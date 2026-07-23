@@ -8,7 +8,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage } from "./firebase.js";
+import { storage, ticketsApi } from "./firebase.js";
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "Review", "Completed"];
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
@@ -159,45 +159,46 @@ export default function CreativeOpsApp() {
   const [openTicketId, setOpenTicketId] = useState(null);
 
   useEffect(() => {
+    let unsubRoster = null;
+    let unsubTickets = null;
+    let lastKnownUserId = "";
+
     (async () => {
-      let r = seedRoster();
-      let t = [];
-      let seq = 0;
-      let cu = "";
       try {
         const res = await storage.get("roster", true);
-        if (res && res.value) r = JSON.parse(res.value);
-        else await storage.set("roster", JSON.stringify(r), true);
-      } catch (e) {
-        try { await storage.set("roster", JSON.stringify(r), true); } catch (e2) {}
-      }
-      try {
-        const res = await storage.get("tickets", true);
-        if (res && res.value) t = JSON.parse(res.value);
+        if (!res || !res.value) await storage.set("roster", JSON.stringify(seedRoster()), true);
       } catch (e) {}
+
+      let seq = 0;
       try {
         const res = await storage.get("ticket_seq", true);
         if (res && res.value) seq = JSON.parse(res.value);
       } catch (e) {}
+      setTicketSeq(seq);
+
       try {
         const res = await storage.get("current_user", false);
-        if (res && res.value) cu = res.value;
+        if (res && res.value) lastKnownUserId = res.value;
       } catch (e) {}
-      setRoster(r);
-      setTickets(t);
-      setTicketSeq(seq);
-      setCurrentUserId(cu && r.find((m) => m.id === cu) ? cu : r[0]?.id || "");
-      setReady(true);
+
+      unsubRoster = storage.subscribe("roster", true, (val) => {
+        const r = val ? JSON.parse(val) : seedRoster();
+        setRoster(r);
+        setCurrentUserId((prev) => prev || (lastKnownUserId && r.find((m) => m.id === lastKnownUserId) ? lastKnownUserId : r[0]?.id) || "");
+        setReady(true);
+      });
+      unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
     })();
+
+    return () => {
+      if (unsubRoster) unsubRoster();
+      if (unsubTickets) unsubTickets();
+    };
   }, []);
 
   const saveRoster = async (next) => {
     setRoster(next);
     try { await storage.set("roster", JSON.stringify(next), true); } catch (e) {}
-  };
-  const saveTickets = async (next) => {
-    setTickets(next);
-    try { await storage.set("tickets", JSON.stringify(next), true); } catch (e) {}
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
@@ -216,9 +217,11 @@ export default function CreativeOpsApp() {
     history: [...ticket.history, { date: new Date().toISOString(), action, by: currentUser?.name || "Unknown" }],
   });
 
-  const updateTicket = (id, updater) => {
-    const next = tickets.map((t) => (t.id === id ? logHistory(updater({ ...t }), updater.__label || "Updated") : t));
-    saveTickets(next);
+  const updateTicket = async (id, updater) => {
+    const current = tickets.find((t) => t.id === id);
+    if (!current) return;
+    const merged = logHistory(updater({ ...current }), updater.__label || "Updated");
+    await ticketsApi.upsert(merged);
   };
 
   const createTicket = async (data) => {
@@ -245,7 +248,7 @@ export default function CreativeOpsApp() {
       hasImage: !!data.imageDataUrl,
       history: [{ date: new Date().toISOString(), action: "Request logged", by: currentUser?.name || "Unknown" }],
     };
-    await saveTickets([t, ...tickets]);
+    await ticketsApi.upsert(t);
     await saveSeq(nextSeq);
     if (data.imageDataUrl) await saveInspoImage(newId, data.imageDataUrl);
     setView("board");
@@ -253,7 +256,7 @@ export default function CreativeOpsApp() {
 
   const deleteTicket = async (id) => {
     const t = tickets.find((x) => x.id === id);
-    await saveTickets(tickets.filter((x) => x.id !== id));
+    await ticketsApi.remove(id);
     if (t?.hasImage) await removeInspoImage(id);
     setOpenTicketId(null);
   };
@@ -702,6 +705,10 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const complete = () => {
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO() }), { __label: "Approved & completed" }));
   };
+  const reopen = () => {
+    if (!window.confirm("Reopen this ticket? It will move back to Review and drop out of completed stats until re-approved.")) return;
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Review", dateCompleted: null }), { __label: "Reopened — marked complete by mistake" }));
+  };
   const saveEdits = () => {
     const changes = [];
     if (eTitle !== ticket.title) changes.push(`title "${ticket.title}" → "${eTitle}"`);
@@ -856,6 +863,11 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Accuracy score</SectionTitle>
               <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: "var(--teal)" }}>{acc ?? "—"}<span className="text-sm">/100</span></div>
+              {isLead && (
+                <button onClick={reopen} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>
+                  <AlertTriangle size={13} /> Reopen (mark as mistake)
+                </button>
+              )}
             </div>
           )}
 
@@ -899,66 +911,104 @@ function StarRow({ value, onChange }) {
 }
 
 function ReportsView({ tickets, roster }) {
+  const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "daily"
   const [month, setMonth] = useState(monthKey(todayISO()));
+  const [day, setDay] = useState(todayISO());
 
-  const completedInMonth = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === month);
+  const periodLabel = periodType === "monthly" ? month : day;
+  const completedInPeriod = tickets.filter((t) => {
+    if (t.status !== "Completed") return false;
+    return periodType === "monthly" ? monthKey(t.dateCompleted) === month : t.dateCompleted === day;
+  });
+  const requestedInPeriod = tickets.filter((t) => {
+    return periodType === "monthly" ? monthKey(t.dateRequested) === month : t.dateRequested === day;
+  });
 
   const perArtist = roster
     .filter((m) => m.role === "Artist" || m.role === "Team Lead")
     .map((m) => {
-      const done = completedInMonth.filter((t) => t.assignedTo === m.id);
+      const done = completedInPeriod.filter((t) => t.assignedTo === m.id);
       const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
       const accs = done.map(ticketAccuracy).filter((a) => a !== null);
       const avgAcc = accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null;
       return { name: m.name, completed: done.length, avgRev: Number(avgRev.toFixed(2)), avgAcc };
     });
 
-  const orgAccs = completedInMonth.map(ticketAccuracy).filter((a) => a !== null);
+  const orgAccs = completedInPeriod.map(ticketAccuracy).filter((a) => a !== null);
   const orgAvgAcc = orgAccs.length ? Math.round(orgAccs.reduce((a, b) => a + b, 0) / orgAccs.length) : null;
-  const orgAvgRev = completedInMonth.length ? completedInMonth.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInMonth.length : 0;
+  const orgAvgRev = completedInPeriod.length ? completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPeriod.length : 0;
 
   const trend = useMemo(() => {
-    const months = [];
-    const base = new Date(month + "-01");
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
-      months.push(d.toISOString().slice(0, 7));
+    if (periodType === "monthly") {
+      const months = [];
+      const base = new Date(month + "-01");
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+        months.push(d.toISOString().slice(0, 7));
+      }
+      return months.map((mk) => {
+        const done = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk);
+        const accs = done.map(ticketAccuracy).filter((a) => a !== null);
+        return {
+          label: mk.slice(5),
+          completed: done.length,
+          accuracy: accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null,
+          avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
+        };
+      });
     }
-    return months.map((mk) => {
-      const done = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk);
+    const days = [];
+    const base = new Date(day + "T00:00:00");
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(base);
+      d.setDate(base.getDate() - i);
+      days.push(d.toISOString().slice(0, 10));
+    }
+    return days.map((dk) => {
+      const done = tickets.filter((t) => t.status === "Completed" && t.dateCompleted === dk);
       const accs = done.map(ticketAccuracy).filter((a) => a !== null);
       return {
-        month: mk.slice(5),
+        label: dk.slice(5),
+        completed: done.length,
         accuracy: accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null,
         avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
       };
     });
-  }, [tickets, month]);
+  }, [tickets, month, day, periodType]);
 
   const priorityBreakdown = PRIORITIES.map((p) => ({ name: p, value: tickets.filter((t) => t.priority === p && t.status !== "Completed").length }));
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <SectionTitle>Report month</SectionTitle>
-        <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
-        <button onClick={() => downloadCSV(ticketsToCSV(completedInMonth, roster), `job-docket-report-${month}.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
-          <Download size={13} /> Export {month} CSV
+        <SectionTitle>Report period</SectionTitle>
+        <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
+          <button onClick={() => setPeriodType("monthly")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "monthly" ? "var(--ink)" : "white", color: periodType === "monthly" ? "white" : "var(--ink)" }}>Monthly</button>
+          <button onClick={() => setPeriodType("daily")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "daily" ? "var(--ink)" : "white", color: periodType === "daily" ? "white" : "var(--ink)" }}>Daily</button>
+        </div>
+        {periodType === "monthly" ? (
+          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+        ) : (
+          <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+        )}
+        <button onClick={() => downloadCSV(ticketsToCSV(completedInPeriod, roster), `job-docket-report-${periodLabel}.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
+          <Download size={13} /> Export {periodLabel} CSV
         </button>
         <button onClick={() => downloadCSV(ticketsToCSV(tickets, roster), `job-docket-all-data.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
           <Download size={13} /> Export all data CSV
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Completed this month" value={completedInMonth.length} icon={CheckCircle2} />
-        <StatCard label="Org avg accuracy" value={orgAvgAcc ?? "—"} icon={BarChart3} />
-        <StatCard label="Org avg revisions" value={orgAvgRev.toFixed(2)} icon={Pencil} />
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <StatCard label="Requests logged" value={requestedInPeriod.length} icon={FilePlus2} />
+        <StatCard label="Completed" value={completedInPeriod.length} icon={CheckCircle2} />
+        <StatCard label="Avg accuracy" value={orgAvgAcc ?? "—"} icon={BarChart3} />
+        <StatCard label="Avg revisions" value={orgAvgRev.toFixed(2)} icon={Pencil} />
         <StatCard label="Open priority items" value={tickets.filter((t) => t.status !== "Completed" && (t.priority === "High" || t.priority === "Urgent")).length} icon={Flag} />
       </div>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Per team member — {month}</SectionTitle>
+        <SectionTitle>Per team member — {periodLabel}</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
             <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
@@ -980,7 +1030,7 @@ function ReportsView({ tickets, roster }) {
 
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Completed per member — {month}</SectionTitle>
+          <SectionTitle>Completed per member — {periodLabel}</SectionTitle>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={perArtist}>
               <CartesianGrid stroke="var(--line)" vertical={false} />
@@ -992,11 +1042,11 @@ function ReportsView({ tickets, roster }) {
           </ResponsiveContainer>
         </div>
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Accuracy & revision trend — last 6 months</SectionTitle>
+          <SectionTitle>{periodType === "monthly" ? "Last 6 months" : "Last 14 days"} — accuracy & revisions</SectionTitle>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={trend}>
               <CartesianGrid stroke="var(--line)" vertical={false} />
-              <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+              <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={periodType === "daily" ? 1 : 0} angle={periodType === "daily" ? -35 : 0} textAnchor={periodType === "daily" ? "end" : "middle"} height={periodType === "daily" ? 45 : 30} />
               <YAxis tick={{ fontSize: 11 }} />
               <Tooltip />
               <Legend wrapperStyle={{ fontSize: 11 }} />
