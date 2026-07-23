@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot } from "firebase/firestore";
 
 // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────
 // Get this from: Firebase Console → Project Settings → Your apps → SDK setup and configuration
@@ -48,5 +48,30 @@ export const storage = {
     const ref = doc(db, collectionName, key);
     await deleteDoc(ref);
     return { key, deleted: true, shared };
+  },
+  // Live-updates a single shared/personal key. Returns an unsubscribe function.
+  subscribe(key, shared, callback) {
+    const collectionName = shared ? "shared" : `personal_${getLocalUserId()}`;
+    const ref = doc(db, collectionName, key);
+    return onSnapshot(ref, (snap) => callback(snap.exists() ? snap.data().value : null));
+  },
+};
+
+// Tickets are stored one-document-per-ticket (not a single shared blob) so
+// concurrent sessions can never silently overwrite each other's changes —
+// deleting or editing one ticket only ever touches that ticket's own document.
+export const ticketsApi = {
+  subscribe(callback) {
+    const colRef = collection(db, "tickets_v2");
+    return onSnapshot(colRef, (snap) => {
+      const list = snap.docs.map((d) => d.data());
+      callback(list);
+    });
+  },
+  async upsert(ticket) {
+    await setDoc(doc(db, "tickets_v2", ticket.id), ticket);
+  },
+  async remove(id) {
+    await deleteDoc(doc(db, "tickets_v2", id));
   },
 };
