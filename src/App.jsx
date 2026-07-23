@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi } from "./firebase.js";
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
@@ -232,13 +232,9 @@ export default function CreativeOpsApp() {
     let unsubEndorsements = null;
     let unsubChat = null;
     let lastKnownUserId = "";
+    let migrationAttempted = false;
 
     (async () => {
-      try {
-        const res = await storage.get("roster", true);
-        if (!res || !res.value) await storage.set("roster", JSON.stringify(seedRoster()), true);
-      } catch (e) {}
-
       let seq = 0;
       try {
         const res = await storage.get("ticket_seq", true);
@@ -251,10 +247,25 @@ export default function CreativeOpsApp() {
         if (res && res.value) lastKnownUserId = res.value;
       } catch (e) {}
 
-      unsubRoster = storage.subscribe("roster", true, (val) => {
-        const r = val ? JSON.parse(val) : seedRoster();
-        setRoster(r);
-        setCurrentUserId((prev) => prev || (lastKnownUserId && r.find((m) => m.id === lastKnownUserId) ? lastKnownUserId : r[0]?.id) || "");
+      unsubRoster = rosterApi.subscribe(async (list) => {
+        if (list.length === 0 && !migrationAttempted) {
+          migrationAttempted = true;
+          // One-time migration from the old single-document roster (if this
+          // team set up profiles before roster moved to per-person storage).
+          try {
+            const legacy = await storage.get("roster", true);
+            if (legacy && legacy.value) {
+              const legacyRoster = JSON.parse(legacy.value);
+              for (const m of legacyRoster) await rosterApi.upsert(m);
+              return; // subscribe fires again with the migrated data
+            }
+          } catch (e) {}
+          const seeded = seedRoster();
+          for (const m of seeded) await rosterApi.upsert(m);
+          return;
+        }
+        setRoster(list);
+        setCurrentUserId((prev) => prev || (lastKnownUserId && list.find((m) => m.id === lastKnownUserId) ? lastKnownUserId : list[0]?.id) || "");
         setReady(true);
       });
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
@@ -277,8 +288,17 @@ export default function CreativeOpsApp() {
   }, []);
 
   const saveRoster = async (next) => {
+    const previousIds = new Set(roster.map((m) => m.id));
+    const nextIds = new Set(next.map((m) => m.id));
     setRoster(next);
-    try { await storage.set("roster", JSON.stringify(next), true); } catch (e) {}
+    for (const m of next) {
+      try { await rosterApi.upsert(m); } catch (e) {}
+    }
+    for (const id of previousIds) {
+      if (!nextIds.has(id)) {
+        try { await rosterApi.remove(id); } catch (e) {}
+      }
+    }
   };
   const saveWallpaper = async (dataUrl) => {
     setWallpaperUrl(dataUrl);
@@ -1878,6 +1898,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
   const [profileWallpaper, setProfileWallpaper] = useState(null);
+  const [pendingHasWallpaper, setPendingHasWallpaper] = useState(false);
   const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", favoriteMusic: "", wishlist: "", quote: "" });
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
@@ -1892,6 +1913,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
         email: selected.email || "", favoriteFood: selected.favoriteFood || "", favoriteMusic: selected.favoriteMusic || "",
         wishlist: selected.wishlist || "", quote: selected.quote || "",
       });
+      setPendingHasWallpaper(!!selected.hasProfileWallpaper);
       if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
       else setProfileWallpaper(null);
     }
@@ -1900,22 +1922,29 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  // Wallpaper flag is saved together with the rest of the profile fields in
+  // one write (not as a separate save call) so a photo upload followed
+  // quickly by "Save" can never overwrite each other.
   const saveProfile = () => {
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form } : m)));
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper } : m)));
     setEditingBio(false);
   };
 
   const handleProfileWallpaper = async (file) => {
     if (!file) return;
     const compressed = await compressImage(file, 1200, 0.75);
-    await saveProfileWallpaper(selected.id, compressed);
-    setProfileWallpaper(compressed);
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, hasProfileWallpaper: true } : m)));
+    try {
+      await saveProfileWallpaper(selected.id, compressed);
+      setProfileWallpaper(compressed);
+      setPendingHasWallpaper(true);
+    } catch (e) {
+      window.alert("Wallpaper upload failed — try a smaller image.");
+    }
   };
   const clearProfileWallpaper = async () => {
     await removeProfileWallpaper(selected.id);
     setProfileWallpaper(null);
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, hasProfileWallpaper: false } : m)));
+    setPendingHasWallpaper(false);
   };
 
   const submitMessage = () => {
@@ -1928,7 +1957,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
   const cardBg = profileWallpaper
     ? { backgroundImage: `url(${profileWallpaper})`, backgroundSize: "cover", backgroundPosition: "center" }
-    : {};
+    : { background: "linear-gradient(135deg, var(--ink), var(--teal))" };
 
   return (
     <div className="grid md:grid-cols-4 gap-4">
@@ -1947,18 +1976,18 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
       <div className="md:col-span-3 space-y-4">
         <div className="border rounded-md overflow-hidden" style={{ borderColor: "var(--line)" }}>
-          <div className="h-44 sm:h-56 relative flex items-end" style={{ ...cardBg, background: profileWallpaper ? undefined : "var(--line)" }}>
-            <div className="absolute inset-0" style={{ background: profileWallpaper ? "linear-gradient(to top, rgba(0,0,0,0.55), rgba(0,0,0,0))" : "none" }} />
-            <div className="relative flex items-center gap-3 p-4">
-              <Avatar member={selected} size={64} />
-              <div>
-                <div className="font-black text-xl" style={{ fontFamily: "var(--font-display)", color: profileWallpaper ? "white" : "var(--ink)" }}>{selected.name}</div>
-                <div className="text-xs" style={{ color: profileWallpaper ? "rgba(255,255,255,0.85)" : "var(--muted)" }}>{selected.role} · {selected.dept}</div>
+          <div className="h-32 sm:h-40" style={cardBg} />
+          <div className="bg-white px-4 pb-4 relative">
+            <div className="-mt-10 flex items-end gap-3 mb-2">
+              <div className="rounded-full" style={{ border: "4px solid white", background: "white" }}>
+                <Avatar member={selected} size={84} />
+              </div>
+              <div className="pb-1">
+                <div className="font-black text-xl leading-tight" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
+                <div className="text-xs" style={{ color: "var(--muted)" }}>{selected.role} · {selected.dept}</div>
               </div>
             </div>
-          </div>
 
-          <div className="bg-white p-4">
             {canEdit && !editingBio && (
               <button onClick={() => setEditingBio(true)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={{ color: "var(--teal)" }}>
                 <Pencil size={12} /> {isSelf ? "Edit my profile" : `Edit ${selected.name}'s profile (Team Lead)`}
@@ -2019,7 +2048,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
                 <div className="text-[11px]" style={{ color: "var(--muted)" }}>Contact details are visible to the whole team, not just you.</div>
               </div>
             )}
-          </div>
+        </div>
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
