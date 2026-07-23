@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
 
 // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────
 // Get this from: Firebase Console → Project Settings → Your apps → SDK setup and configuration
@@ -42,5 +42,11 @@ export const storage = {
     const ref = doc(db, collectionName, key);
     await setDoc(ref, { value });
     return { key, value, shared };
+  },
+  async remove(key, shared = false) {
+    const collectionName = shared ? "shared" : `personal_${getLocalUserId()}`;
+    const ref = doc(db, collectionName, key);
+    await deleteDoc(ref);
+    return { key, deleted: true, shared };
   },
 };
