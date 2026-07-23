@@ -83,3 +83,6 @@ export const chatApi = makeCollectionApi("chat_messages");
 // (photo, bio, contact info, wallpaper) can never silently overwrite another
 // person's data, or a second edit to the same person made moments apart.
 export const rosterApi = makeCollectionApi("roster_v2");
+// Each gallery photo is its own document too, so adding/removing one photo
+// never touches anyone else's gallery items.
+export const galleryApi = makeCollectionApi("profile_gallery");
