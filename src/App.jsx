@@ -3,13 +3,13 @@ import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
   MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
-  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi } from "./firebase.js";
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
@@ -222,6 +222,7 @@ export default function CreativeOpsApp() {
   const [reminders, setReminders] = useState([]);
   const [endorsements, setEndorsements] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
+  const [galleryItems, setGalleryItems] = useState([]);
 
   useEffect(() => {
     let unsubRoster = null;
@@ -231,6 +232,7 @@ export default function CreativeOpsApp() {
     let unsubReminders = null;
     let unsubEndorsements = null;
     let unsubChat = null;
+    let unsubGallery = null;
     let lastKnownUserId = "";
     let migrationAttempted = false;
 
@@ -274,6 +276,7 @@ export default function CreativeOpsApp() {
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
       unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
       unsubChat = chatApi.subscribe((list) => setChatMessages(list));
+      unsubGallery = galleryApi.subscribe((list) => setGalleryItems(list));
     })();
 
     return () => {
@@ -284,6 +287,7 @@ export default function CreativeOpsApp() {
       if (unsubReminders) unsubReminders();
       if (unsubEndorsements) unsubEndorsements();
       if (unsubChat) unsubChat();
+      if (unsubGallery) unsubGallery();
     };
   }, []);
 
@@ -362,6 +366,13 @@ export default function CreativeOpsApp() {
   };
   const deleteChatMessage = async (id) => {
     await chatApi.remove(id);
+  };
+
+  const addGalleryItem = async (memberId, dataUrl, caption) => {
+    await galleryApi.upsert({ id: uid(), memberId, dataUrl, caption: caption || "", date: new Date().toISOString() });
+  };
+  const removeGalleryItem = async (id) => {
+    await galleryApi.remove(id);
   };
 
   const exportBackup = () => {
@@ -520,6 +531,10 @@ export default function CreativeOpsApp() {
             addEndorsement={addEndorsement}
             deleteEndorsement={deleteEndorsement}
             saveRoster={saveRoster}
+            tickets={tickets}
+            galleryItems={galleryItems}
+            addGalleryItem={addGalleryItem}
+            removeGalleryItem={removeGalleryItem}
           />
         )}
         {view === "chat" && (
@@ -818,6 +833,42 @@ function RemindersPanel({ reminders, addReminder, deleteReminder }) {
   );
 }
 
+function LeaderboardPanel({ tickets, roster }) {
+  const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+  const ranked = members
+    .map((m) => ({ member: m, completed: tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed").length }))
+    .filter((r) => r.completed > 0)
+    .sort((a, b) => b.completed - a.completed)
+    .slice(0, 5);
+
+  const medalColor = ["#D9A441", "#A8A8A8", "#B08D57"];
+
+  return (
+    <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
+      <div className="flex items-center gap-1.5">
+        <Trophy size={14} color="var(--amber)" />
+        <SectionTitle>Leaderboard — most completed (all-time)</SectionTitle>
+      </div>
+      {ranked.length === 0 ? (
+        <EmptyState text="No completed projects yet — first one on the board wins." />
+      ) : (
+        <div className="mt-3 space-y-2">
+          {ranked.map((r, i) => (
+            <div key={r.member.id} className="flex items-center gap-3">
+              <div className="w-6 text-center font-black" style={{ fontFamily: "var(--font-display)", color: i < 3 ? medalColor[i] : "var(--muted)" }}>
+                {i < 3 ? <Trophy size={16} color={medalColor[i]} /> : i + 1}
+              </div>
+              <Avatar member={r.member} size={28} />
+              <div className="flex-1 text-sm font-semibold">{r.member.name}</div>
+              <div className="text-sm font-black" style={{ fontFamily: "var(--font-display)" }}>{r.completed}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead, postAnnouncement, deleteAnnouncement, reminders, addReminder, deleteReminder }) {
   const open = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
   const overdue = open.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO());
@@ -866,6 +917,7 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
     <div className="space-y-6">
       <AnnouncementsPanel announcements={announcements} isLead={isLead} postAnnouncement={postAnnouncement} deleteAnnouncement={deleteAnnouncement} />
       <RemindersPanel reminders={reminders} addReminder={addReminder} deleteReminder={deleteReminder} />
+      <LeaderboardPanel tickets={tickets} roster={roster} />
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Open tickets" value={open.length} icon={KanbanSquare} />
         <StatCard label="Overdue" value={overdue.length} icon={AlertTriangle} alert={overdue.length > 0} />
@@ -1893,7 +1945,7 @@ function ReportsView({ tickets, roster }) {
   );
 }
 
-function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorsement, deleteEndorsement, saveRoster }) {
+function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem }) {
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
@@ -1946,6 +1998,37 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
     setProfileWallpaper(null);
     setPendingHasWallpaper(false);
   };
+
+  const [galleryCaption, setGalleryCaption] = useState("");
+  const [lightbox, setLightbox] = useState(null);
+  const [statsPeriodType, setStatsPeriodType] = useState("monthly"); // "monthly" | "daily"
+  const [statsMonth, setStatsMonth] = useState(monthKey(todayISO()));
+  const [statsDay, setStatsDay] = useState(todayISO());
+
+  const myGallery = galleryItems.filter((g) => g.memberId === selected?.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const handleGalleryUpload = async (file) => {
+    if (!file || !selected) return;
+    const compressed = await compressImage(file, 1000, 0.75);
+    await addGalleryItem(selected.id, compressed, galleryCaption);
+    setGalleryCaption("");
+  };
+
+  const statsPeriodLabel = statsPeriodType === "monthly" ? statsMonth : statsDay;
+  const inStatsPeriod = (isoDate) => {
+    if (!isoDate) return false;
+    return statsPeriodType === "monthly" ? monthKey(isoDate) === statsMonth : isoDate === statsDay;
+  };
+  const myTickets = tickets.filter((t) => t.assignedTo === selected?.id);
+  const myRequests = tickets.filter((t) => t.requestedBy === selected?.id);
+  const stats = {
+    completedInPeriod: myTickets.filter((t) => t.status === "Completed" && inStatsPeriod(t.dateCompleted)).length,
+    completedAllTime: myTickets.filter((t) => t.status === "Completed").length,
+    ongoing: myTickets.filter((t) => !CLOSED_STATUSES.includes(t.status)).length,
+    requestsInPeriod: myRequests.filter((t) => inStatsPeriod(t.dateRequested)).length,
+    requestsAllTime: myRequests.length,
+  };
+
 
   const submitMessage = () => {
     if (!message.trim() || !selected) return;
@@ -2052,6 +2135,59 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <div className="flex flex-wrap items-center gap-3">
+            <SectionTitle>Productivity — {selected.name}</SectionTitle>
+            <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
+              <button onClick={() => setStatsPeriodType("monthly")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: statsPeriodType === "monthly" ? "var(--ink)" : "white", color: statsPeriodType === "monthly" ? "white" : "var(--ink)" }}>Monthly</button>
+              <button onClick={() => setStatsPeriodType("daily")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: statsPeriodType === "daily" ? "var(--ink)" : "white", color: statsPeriodType === "daily" ? "white" : "var(--ink)" }}>Daily</button>
+            </div>
+            {statsPeriodType === "monthly" ? (
+              <input type="month" value={statsMonth} onChange={(e) => setStatsMonth(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+            ) : (
+              <input type="date" value={statsDay} onChange={(e) => setStatsDay(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+            )}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+            <StatCard label={`Completed (${statsPeriodLabel})`} value={stats.completedInPeriod} icon={CheckCircle2} />
+            <StatCard label="Ongoing / pending" value={stats.ongoing} icon={KanbanSquare} />
+            <StatCard label={`Requests made (${statsPeriodLabel})`} value={stats.requestsInPeriod} icon={FilePlus2} />
+            <StatCard label="Completed (all-time)" value={stats.completedAllTime} icon={Trophy} />
+          </div>
+        </div>
+
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Most memorable projects</SectionTitle>
+          {canEdit && (
+            <div className="flex flex-wrap gap-2 mt-2 items-center">
+              <input value={galleryCaption} onChange={(e) => setGalleryCaption(e.target.value)} placeholder="Caption (optional)…" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[140px]" style={{ borderColor: "var(--line)" }} />
+              <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
+                <Upload size={13} /> Add photo
+                <input type="file" accept="image/*" className="hidden" onChange={(e) => handleGalleryUpload(e.target.files?.[0])} />
+              </label>
+            </div>
+          )}
+          {myGallery.length === 0 ? (
+            <EmptyState text="No memorable projects added yet." />
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mt-3">
+              {myGallery.map((g) => (
+                <div key={g.id} className="relative group">
+                  <button onClick={() => setLightbox(g)} className="w-full">
+                    <img src={g.dataUrl} alt={g.caption || "memorable project"} className="w-full h-28 object-cover rounded border" style={{ borderColor: "var(--line)" }} />
+                  </button>
+                  {g.caption && <div className="text-[11px] mt-1 truncate" style={{ color: "var(--muted)" }}>{g.caption}</div>}
+                  {canEdit && (
+                    <button onClick={() => removeGalleryItem(g.id)} className="absolute top-1 right-1 bg-black/60 rounded-full p-0.5">
+                      <X size={12} color="white" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
           <SectionTitle>Endorsements & messages</SectionTitle>
           {!isSelf && (
             <div className="flex gap-2 mt-2">
@@ -2073,6 +2209,15 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
           </div>
         </div>
       </div>
+      {lightbox && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setLightbox(null)}>
+          <div className="max-w-2xl w-full" onClick={(e) => e.stopPropagation()}>
+            <img src={lightbox.dataUrl} alt={lightbox.caption || "memorable project"} className="w-full rounded" />
+            {lightbox.caption && <div className="text-white text-sm mt-2 text-center">{lightbox.caption}</div>}
+            <button onClick={() => setLightbox(null)} className="mt-2 mx-auto flex items-center gap-1 text-white text-xs font-semibold"><X size={13} /> Close</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
