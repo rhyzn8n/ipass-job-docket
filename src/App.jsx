@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi } from "./firebase.js";
+import { storage, ticketsApi, chatApi } from "./firebase.js";
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
@@ -150,6 +150,19 @@ async function removeAvatar(memberId) {
   try { if (storage.remove) await storage.remove(`avatar_${memberId}`, true); } catch (e) {}
 }
 
+async function saveProfileWallpaper(memberId, dataUrl) {
+  try { await storage.set(`profile_wallpaper_${memberId}`, dataUrl, true); } catch (e) {}
+}
+async function loadProfileWallpaper(memberId) {
+  try {
+    const res = await storage.get(`profile_wallpaper_${memberId}`, true);
+    return res?.value || null;
+  } catch (e) { return null; }
+}
+async function removeProfileWallpaper(memberId) {
+  try { if (storage.remove) await storage.remove(`profile_wallpaper_${memberId}`, true); } catch (e) {}
+}
+
 function Avatar({ member, size = 28 }) {
   const [url, setUrl] = useState(null);
   useEffect(() => {
@@ -208,6 +221,7 @@ export default function CreativeOpsApp() {
   const [announcements, setAnnouncements] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [endorsements, setEndorsements] = useState([]);
+  const [chatMessages, setChatMessages] = useState([]);
 
   useEffect(() => {
     let unsubRoster = null;
@@ -216,6 +230,7 @@ export default function CreativeOpsApp() {
     let unsubAnnouncements = null;
     let unsubReminders = null;
     let unsubEndorsements = null;
+    let unsubChat = null;
     let lastKnownUserId = "";
 
     (async () => {
@@ -247,6 +262,7 @@ export default function CreativeOpsApp() {
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
       unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
+      unsubChat = chatApi.subscribe((list) => setChatMessages(list));
     })();
 
     return () => {
@@ -256,6 +272,7 @@ export default function CreativeOpsApp() {
       if (unsubAnnouncements) unsubAnnouncements();
       if (unsubReminders) unsubReminders();
       if (unsubEndorsements) unsubEndorsements();
+      if (unsubChat) unsubChat();
     };
   }, []);
 
@@ -317,6 +334,14 @@ export default function CreativeOpsApp() {
     const next = endorsements.filter((e2) => e2.id !== id);
     setEndorsements(next);
     try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
+  };
+
+  const sendChatMessage = async (text) => {
+    if (!text.trim() || !currentUser) return;
+    await chatApi.upsert({ id: uid(), text: text.trim(), by: currentUser.name, byId: currentUser.id, date: new Date().toISOString() });
+  };
+  const deleteChatMessage = async (id) => {
+    await chatApi.remove(id);
   };
 
   const exportBackup = () => {
@@ -476,6 +501,9 @@ export default function CreativeOpsApp() {
             saveRoster={saveRoster}
           />
         )}
+        {view === "chat" && (
+          <ChatView messages={chatMessages} roster={roster} currentUser={currentUser} isLead={isLead} sendMessage={sendChatMessage} deleteMessage={deleteChatMessage} />
+        )}
         {view === "team" && (
           <TeamView
             roster={roster}
@@ -622,6 +650,7 @@ function TabBar({ view, setView }) {
     { id: "directory", label: "Directory", icon: FolderOpen },
     { id: "reports", label: "Reports", icon: BarChart3 },
     { id: "teamspace", label: "Team Space", icon: Heart },
+    { id: "chat", label: "Team Chat", icon: MessageSquarePlus },
     { id: "team", label: "Team", icon: Users },
   ];
   return (
@@ -1146,9 +1175,7 @@ function DirectoryView({ tickets, roster, onOpen }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <SectionTitle>Completed work directory</SectionTitle>
-      </div>
+      <SectionTitle>Completed work directory ({completed.length})</SectionTitle>
       <div className="relative max-w-sm">
         <Search size={14} className="absolute left-2.5 top-2.5" color="var(--muted)" />
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search title, department, purpose, artist…" className="w-full border rounded pl-8 pr-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
@@ -1156,23 +1183,95 @@ function DirectoryView({ tickets, roster, onOpen }) {
       {sorted.length === 0 ? (
         <EmptyState text={completed.length === 0 ? "No completed projects yet." : "No matches."} />
       ) : (
-        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
-          {sorted.map((t) => (
-            <div key={t.id} className="bg-white border rounded-md p-3" style={{ borderColor: "var(--line)" }}>
-              <button onClick={() => onOpen(t.id)} className="text-left w-full">
-                <div className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")} · {t.dateCompleted}</div>
-                <div className="font-semibold text-sm mt-0.5">{t.title}</div>
-                <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>{t.dept} · {getPurposes(t).join(", ")} · {nameOf(roster, t.assignedTo)}</div>
-              </button>
-              {t.referenceLink && (
-                <a href={t.referenceLink} target="_blank" rel="noopener noreferrer" className="text-xs flex items-center gap-1 mt-2 underline" style={{ color: "var(--teal)" }}>
-                  <LinkIcon size={12} /> View reference
-                </a>
-              )}
-            </div>
-          ))}
+        <div className="bg-white border rounded-md overflow-x-auto" style={{ borderColor: "var(--line)" }}>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                <th className="p-3">Job</th>
+                <th className="p-3">Title</th>
+                <th className="p-3">Dept / Purpose</th>
+                <th className="p-3">Artist</th>
+                <th className="p-3">Completed</th>
+                <th className="p-3">Reference link</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((t) => (
+                <tr key={t.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                  <td className="p-3" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")}</td>
+                  <td className="p-3">
+                    <button onClick={() => onOpen(t.id)} className="font-medium underline text-left" style={{ color: "var(--ink)" }}>{t.title}</button>
+                  </td>
+                  <td className="p-3 text-xs" style={{ color: "var(--muted)" }}>{t.dept} · {getPurposes(t).join(", ") || "—"}</td>
+                  <td className="p-3 text-xs">{nameOf(roster, t.assignedTo)}</td>
+                  <td className="p-3 text-xs">{t.dateCompleted || "—"}</td>
+                  <td className="p-3 text-xs">
+                    {t.referenceLink ? (
+                      <a href={t.referenceLink} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 underline" style={{ color: "var(--teal)" }}>
+                        <LinkIcon size={12} /> {t.referenceLink}
+                      </a>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMessage }) {
+  const [text, setText] = useState("");
+  const sorted = [...messages].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    sendMessage(text);
+    setText("");
+  };
+
+  const memberFor = (byId) => roster.find((m) => m.id === byId);
+
+  return (
+    <div className="bg-white border rounded-md flex flex-col" style={{ borderColor: "var(--line)", height: "70vh" }}>
+      <div className="p-3 border-b" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Team Chat</SectionTitle>
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {sorted.length === 0 && <EmptyState text="No messages yet — say hi!" />}
+        {sorted.map((m) => {
+          const isMine = m.byId === currentUser?.id;
+          return (
+            <div key={m.id} className={`flex items-start gap-2 ${isMine ? "flex-row-reverse" : ""}`}>
+              <Avatar member={memberFor(m.byId)} size={26} />
+              <div className={`max-w-[70%] ${isMine ? "items-end" : "items-start"} flex flex-col`}>
+                <div className="rounded-lg px-3 py-1.5 text-sm" style={{ background: isMine ? "var(--ink)" : "var(--paper)", color: isMine ? "white" : "var(--ink)" }}>
+                  {m.text}
+                </div>
+                <div className="text-[10px] mt-0.5 flex items-center gap-1.5" style={{ color: "var(--muted)" }}>
+                  {m.by} · {new Date(m.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  {(isMine || isLead) && <button onClick={() => deleteMessage(m.id)}><X size={10} /></button>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+      <form onSubmit={submit} className="p-3 border-t flex gap-2" style={{ borderColor: "var(--line)" }}>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Message the team…" className="flex-1 border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
+        <button type="submit" className="px-4 py-2 rounded text-white text-sm font-semibold flex items-center gap-1.5" style={{ background: "var(--ink)" }}><Send size={14} /> Send</button>
+      </form>
     </div>
   );
 }
@@ -1777,21 +1876,44 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
-  const [bioInput, setBioInput] = useState("");
-  const [likesInput, setLikesInput] = useState("");
+  const [profileWallpaper, setProfileWallpaper] = useState(null);
+  const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", wishlist: "", quote: "" });
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
   const mine = endorsements.filter((e) => e.toMemberId === selected?.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   useEffect(() => {
-    if (selected) { setBioInput(selected.bio || ""); setLikesInput(selected.likes || ""); }
+    if (selected) {
+      setForm({
+        bio: selected.bio || "", likes: selected.likes || "", mobile: selected.mobile || "",
+        email: selected.email || "", favoriteFood: selected.favoriteFood || "",
+        wishlist: selected.wishlist || "", quote: selected.quote || "",
+      });
+      if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
+      else setProfileWallpaper(null);
+    }
     setEditingBio(false);
-  }, [selected?.id]);
+  }, [selected?.id, selected?.hasProfileWallpaper]);
 
-  const saveBio = () => {
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, bio: bioInput, likes: likesInput } : m)));
+  const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const saveProfile = () => {
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form } : m)));
     setEditingBio(false);
+  };
+
+  const handleProfileWallpaper = async (file) => {
+    if (!file) return;
+    const compressed = await compressImage(file, 1200, 0.75);
+    await saveProfileWallpaper(selected.id, compressed);
+    setProfileWallpaper(compressed);
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, hasProfileWallpaper: true } : m)));
+  };
+  const clearProfileWallpaper = async () => {
+    await removeProfileWallpaper(selected.id);
+    setProfileWallpaper(null);
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, hasProfileWallpaper: false } : m)));
   };
 
   const submitMessage = () => {
@@ -1801,6 +1923,10 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
   };
 
   if (!selected) return <EmptyState text="Add team members first, in the Team tab." />;
+
+  const cardBg = profileWallpaper
+    ? { backgroundImage: `url(${profileWallpaper})`, backgroundSize: "cover", backgroundPosition: "center" }
+    : {};
 
   return (
     <div className="grid md:grid-cols-4 gap-4">
@@ -1818,37 +1944,75 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
       </div>
 
       <div className="md:col-span-3 space-y-4">
-        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <div className="flex items-center gap-3">
-            <Avatar member={selected} size={48} />
-            <div>
-              <div className="font-black text-lg" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
-              <div className="text-xs" style={{ color: "var(--muted)" }}>{selected.role} · {selected.dept}</div>
-            </div>
-            {isSelf && !editingBio && <button onClick={() => setEditingBio(true)} className="ml-auto"><Pencil size={14} color="var(--muted)" /></button>}
-          </div>
-
-          {!editingBio ? (
-            <div className="mt-3 text-sm space-y-2">
-              <div>{selected.bio || <span style={{ color: "var(--muted)" }}>No bio yet.</span>}</div>
-              {selected.likes && (
-                <div className="text-xs" style={{ color: "var(--muted)" }}><b>Likes:</b> {selected.likes}</div>
-              )}
-            </div>
-          ) : (
-            <div className="mt-3 space-y-2">
-              <Field label="Bio">
-                <textarea value={bioInput} onChange={(e) => setBioInput(e.target.value)} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="A little about you…" />
-              </Field>
-              <Field label="Likes / interests">
-                <input value={likesInput} onChange={(e) => setLikesInput(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Coffee, retro games, hiking…" />
-              </Field>
-              <div className="flex gap-2">
-                <button onClick={saveBio} className="flex items-center gap-1 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}><Save size={13} /> Save</button>
-                <button onClick={() => setEditingBio(false)} className="px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Cancel</button>
+        <div className="border rounded-md overflow-hidden" style={{ borderColor: "var(--line)" }}>
+          <div className="p-4" style={{ ...cardBg, background: profileWallpaper ? undefined : "var(--paper)" }}>
+            <div className="flex items-center gap-3 bg-white/90 rounded-md p-2 w-fit">
+              <Avatar member={selected} size={48} />
+              <div>
+                <div className="font-black text-lg" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
+                <div className="text-xs" style={{ color: "var(--muted)" }}>{selected.role} · {selected.dept}</div>
               </div>
             </div>
-          )}
+          </div>
+
+          <div className="bg-white p-4">
+            {isSelf && !editingBio && (
+              <button onClick={() => setEditingBio(true)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={{ color: "var(--teal)" }}>
+                <Pencil size={12} /> Edit my profile
+              </button>
+            )}
+
+            {!editingBio ? (
+              <div className="text-sm space-y-2">
+                <div>{selected.bio || <span style={{ color: "var(--muted)" }}>No bio yet.</span>}</div>
+                {selected.quote && <div className="italic text-sm" style={{ color: "var(--muted)" }}>"{selected.quote}"</div>}
+                <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs pt-2" style={{ color: "var(--muted)" }}>
+                  {selected.likes && <div><b style={{ color: "var(--ink)" }}>Likes:</b> {selected.likes}</div>}
+                  {selected.favoriteFood && <div><b style={{ color: "var(--ink)" }}>Favorite food:</b> {selected.favoriteFood}</div>}
+                  {selected.wishlist && <div><b style={{ color: "var(--ink)" }}>Wishlist:</b> {selected.wishlist}</div>}
+                  {selected.mobile && <div><b style={{ color: "var(--ink)" }}>Mobile:</b> {selected.mobile}</div>}
+                  {selected.email && <div><b style={{ color: "var(--ink)" }}>Email:</b> {selected.email}</div>}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <Field label="Profile wallpaper (optional)">
+                  <input type="file" accept="image/*" onChange={(e) => handleProfileWallpaper(e.target.files?.[0])} className="text-sm" />
+                  {profileWallpaper && (
+                    <button onClick={clearProfileWallpaper} className="ml-2 text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
+                  )}
+                </Field>
+                <Field label="Bio">
+                  <textarea value={form.bio} onChange={(e) => setField("bio", e.target.value)} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="A little about you…" />
+                </Field>
+                <Field label="Favorite quote">
+                  <input value={form.quote} onChange={(e) => setField("quote", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                </Field>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <Field label="Likes / interests">
+                    <input value={form.likes} onChange={(e) => setField("likes", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Coffee, retro games, hiking…" />
+                  </Field>
+                  <Field label="Favorite food">
+                    <input value={form.favoriteFood} onChange={(e) => setField("favoriteFood", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                  </Field>
+                  <Field label="Wishlist">
+                    <input value={form.wishlist} onChange={(e) => setField("wishlist", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                  </Field>
+                  <Field label="Mobile number">
+                    <input value={form.mobile} onChange={(e) => setField("mobile", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                  </Field>
+                  <Field label="Email">
+                    <input type="email" value={form.email} onChange={(e) => setField("email", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                  </Field>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={saveProfile} className="flex items-center gap-1 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}><Save size={13} /> Save</button>
+                  <button onClick={() => setEditingBio(false)} className="px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Cancel</button>
+                </div>
+                <div className="text-[11px]" style={{ color: "var(--muted)" }}>Contact details are visible to the whole team, not just you.</div>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
