@@ -55,6 +55,14 @@ function nameOf(roster, id) {
   return roster.find((m) => m.id === id)?.name || "Unassigned";
 }
 
+// Backward compatible: old tickets have a single `purpose` string,
+// new tickets have a `purposes` array (a project can serve several purposes).
+function getPurposes(ticket) {
+  if (ticket.purposes && ticket.purposes.length) return ticket.purposes;
+  if (ticket.purpose) return [ticket.purpose];
+  return [];
+}
+
 function csvEscape(v) {
   if (v === null || v === undefined) return "";
   const s = String(v);
@@ -63,17 +71,17 @@ function csvEscape(v) {
 
 function ticketsToCSV(list, roster) {
   const headers = [
-    "Ticket No", "Title", "Department", "Content Type", "Purpose", "Requested By", "Assigned To",
-    "Priority", "Status", "Date Requested", "Due Date", "Date Completed",
+    "Ticket No", "Title", "Department", "Content Type", "Purpose(s)", "Requested By", "Assigned To",
+    "Priority", "Status", "Date Requested", "Due Date", "Date Completed", "Units",
     "Minor Revisions", "Major Revisions", "Revision Equivalent", "Satisfaction", "Brief Compliance", "Accuracy",
   ];
   const rows = list.map((t) => {
     const minor = t.revisions.filter((r) => r.type === "minor").length;
     const major = t.revisions.filter((r) => r.type === "major").length;
     return [
-      t.ticketNo, t.title, t.dept, t.contentType || "", t.purpose || "",
+      t.ticketNo, t.title, t.dept, t.contentType || "", getPurposes(t).join("; "),
       nameOf(roster, t.requestedBy), nameOf(roster, t.assignedTo),
-      t.priority, t.status, t.dateRequested, t.dueDate || "", t.dateCompleted || "",
+      t.priority, t.status, t.dateRequested, t.dueDate || "", t.dateCompleted || "", t.units || "",
       minor, major, revisionEquivalent(t).toFixed(2),
       t.satisfactionScore || "", t.briefCompliance || "", ticketAccuracy(t) ?? "",
     ].map(csvEscape).join(",");
@@ -236,9 +244,10 @@ export default function CreativeOpsApp() {
       ticketNo: nextSeq,
       title: data.title,
       description: data.description,
+      requesterNotes: data.requesterNotes || "",
       dept: data.dept,
       contentType: data.contentType,
-      purpose: data.purpose,
+      purposes: data.purposes || [],
       requestedBy: data.requestedBy,
       assignedTo: data.assignedTo || null,
       priority: data.priority,
@@ -247,6 +256,8 @@ export default function CreativeOpsApp() {
       dueDate: data.dueDate || null,
       dateCompleted: null,
       revisions: [],
+      revisionRequests: [],
+      units: null,
       satisfactionScore: null,
       briefCompliance: null,
       hasImage: !!data.imageDataUrl,
@@ -377,7 +388,7 @@ function TicketCard({ ticket, roster, onOpen }) {
         </div>
         <div className="font-semibold text-sm leading-snug mb-1">{ticket.title}</div>
         <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-          {ticket.dept} · {ticket.contentType || "—"}{ticket.purpose ? ` · ${ticket.purpose}` : ""} · {nameOf(roster, ticket.assignedTo)}
+          {ticket.dept} · {ticket.contentType || "—"}{getPurposes(ticket).length ? ` · ${getPurposes(ticket).join(", ")}` : ""} · {nameOf(roster, ticket.assignedTo)}
         </div>
         <div className="flex items-center justify-between">
           <StatusPill status={ticket.status} />
@@ -418,7 +429,19 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
 
   const staticCount = tickets.filter((t) => t.contentType === "Static").length;
   const videoCount = tickets.filter((t) => t.contentType === "Video").length;
-  const byPurpose = PURPOSES.map((p) => ({ name: p, value: tickets.filter((t) => t.purpose === p).length })).filter((p) => p.value > 0);
+  const allPurposeTags = tickets.flatMap((t) => getPurposes(t));
+  const byPurpose = PURPOSES.map((p) => ({ name: p, value: allPurposeTags.filter((x) => x === p).length })).filter((p) => p.value > 0);
+
+  const now = new Date();
+  const thisMonthKey = now.toISOString().slice(0, 7);
+  const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthKey = lastMonthDate.toISOString().slice(0, 7);
+  const unitsInMonth = (mk) => tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk).reduce((s, t) => s + (t.units || 0), 0);
+  const unitsThisMonth = unitsInMonth(thisMonthKey);
+  const unitsLastMonth = unitsInMonth(lastMonthKey);
+  const unitsPct = unitsLastMonth > 0
+    ? Math.round(((unitsThisMonth - unitsLastMonth) / unitsLastMonth) * 100)
+    : (unitsThisMonth > 0 ? 100 : 0);
 
   return (
     <div className="space-y-6">
@@ -428,7 +451,13 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
         <StatCard label="Urgent priority" value={open.filter((t) => t.priority === "Urgent").length} icon={Flag} />
         <StatCard label="On hold" value={onHold.length} icon={Clock} />
         <StatCard label="Cancelled" value={cancelled.length} icon={X} />
+        <StatCard label="Units this month" value={unitsThisMonth} icon={Pencil} trendPct={unitsPct} />
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <StatCard label="Completed total" value={tickets.filter((t) => t.status === "Completed").length} icon={CheckCircle2} />
+        <StatCard label="Units last month" value={unitsLastMonth} icon={Pencil} />
+        <StatCard label="Units all-time" value={tickets.filter((t) => t.status === "Completed").reduce((s, t) => s + (t.units || 0), 0)} icon={Pencil} />
       </div>
 
       {recentlyClosed.length > 0 && (
@@ -467,33 +496,19 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
         </table>
       </div>
 
-      <div className="grid md:grid-cols-3 gap-4">
-        <div className="md:col-span-2 bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Priority board — open jobs</SectionTitle>
-          {open.length === 0 ? <EmptyState text="No open jobs. New requests will land here." /> : (
-            <div className="grid sm:grid-cols-2 gap-3 mt-3">
-              {open.slice(0, 6).map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
-            </div>
-          )}
-          {open.length > 6 && (
-            <button onClick={() => setView("board")} className="mt-3 text-sm font-semibold flex items-center gap-1" style={{ color: "var(--teal)" }}>
-              View full board <ChevronRight size={14} />
-            </button>
-          )}
-        </div>
+      <RequestsPanel tickets={tickets} roster={roster} onOpen={onOpen} />
 
-        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Recent activity</SectionTitle>
-          <div className="mt-3 space-y-3">
-            {recent.length === 0 && <EmptyState text="No activity yet." />}
-            {recent.map((h, i) => (
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Recent activity</SectionTitle>
+        <div className="mt-3 grid sm:grid-cols-2 gap-x-6">
+          {recent.length === 0 && <EmptyState text="No activity yet." />}
+          {recent.map((h, i) => (
               <div key={i} className="text-xs">
                 <div className="font-semibold">{h.action}</div>
                 <div style={{ color: "var(--muted)" }}>JOB-{String(h.ticket.ticketNo).padStart(4, "0")} · {h.by} · {new Date(h.date).toLocaleDateString()}</div>
               </div>
             ))}
           </div>
-        </div>
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -521,11 +536,68 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
   );
 }
 
-function StatCard({ label, value, icon: Icon, alert }) {
+function RequestsPanel({ tickets, roster, onOpen }) {
+  const [tab, setTab] = useState("overdue");
+  const today = todayISO();
+
+  const groups = {
+    overdue: tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < today),
+    ongoing: tickets.filter((t) => !CLOSED_STATUSES.includes(t.status) && t.status !== "On Hold"),
+    onhold: tickets.filter((t) => t.status === "On Hold"),
+    completed: tickets.filter((t) => t.status === "Completed"),
+    cancelled: tickets.filter((t) => t.status === "Cancelled"),
+    all: tickets,
+  };
+  const tabs = [
+    { id: "overdue", label: "Overdue" },
+    { id: "ongoing", label: "Ongoing" },
+    { id: "onhold", label: "On Hold" },
+    { id: "completed", label: "Completed" },
+    { id: "cancelled", label: "Cancelled" },
+    { id: "all", label: "All" },
+  ];
+  const list = groups[tab];
+
+  return (
+    <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+      <SectionTitle>Requests</SectionTitle>
+      <div className="flex flex-wrap gap-1 mt-2 mb-3">
+        {tabs.map((tb) => (
+          <button
+            key={tb.id}
+            onClick={() => setTab(tb.id)}
+            className="px-2.5 py-1 text-xs font-semibold rounded"
+            style={{ background: tab === tb.id ? "var(--ink)" : "var(--paper)", color: tab === tb.id ? "white" : "var(--muted)" }}
+          >
+            {tb.label} ({groups[tb.id].length})
+          </button>
+        ))}
+      </div>
+      {list.length === 0 ? (
+        <EmptyState text="Nothing here." />
+      ) : (
+        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[420px] overflow-y-auto pr-1">
+          {list.map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, icon: Icon, alert, trendPct }) {
+  const hasTrend = trendPct !== undefined && trendPct !== null;
+  const up = hasTrend && trendPct >= 0;
   return (
     <div className="bg-white border rounded-md p-3 flex-1" style={{ borderColor: alert ? "var(--coral)" : "var(--line)" }}>
       <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--muted)" }}><Icon size={13} /> {label}</div>
-      <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: alert ? "var(--coral)" : "var(--ink)" }}>{value}</div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <div className="text-2xl font-black" style={{ fontFamily: "var(--font-display)", color: alert ? "var(--coral)" : "var(--ink)" }}>{value}</div>
+        {hasTrend && (
+          <span className="text-[11px] font-semibold" style={{ color: up ? "var(--teal)" : "var(--coral)" }}>
+            {up ? "▲" : "▼"} {Math.abs(trendPct)}% vs last month
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -541,9 +613,10 @@ function EmptyState({ text }) {
 function NewRequestForm({ roster, currentUser, onCreate }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [requesterNotes, setRequesterNotes] = useState("");
   const [dept, setDept] = useState(currentUser?.dept || "Social Media");
   const [contentType, setContentType] = useState("Static");
-  const [purpose, setPurpose] = useState("Ads");
+  const [purposes, setPurposes] = useState(["Ads"]);
   const [requestedBy, setRequestedBy] = useState(currentUser?.id || "");
   const [assignedTo, setAssignedTo] = useState("");
   const [priority, setPriority] = useState("Normal");
@@ -554,6 +627,10 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
   const [confirm, setConfirm] = useState(false);
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+
+  const togglePurpose = (p) => {
+    setPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
+  };
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
@@ -567,8 +644,8 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
     e.preventDefault();
     if (!title.trim() || !requestedBy) return;
     setSubmitting(true);
-    await onCreate({ title, description, dept, contentType, purpose, requestedBy, assignedTo, priority, dueDate, imageDataUrl: imagePreview });
-    setTitle(""); setDescription(""); setAssignedTo(""); setDueDate(""); setPriority("Normal");
+    await onCreate({ title, description, requesterNotes, dept, contentType, purposes, requestedBy, assignedTo, priority, dueDate, imageDataUrl: imagePreview });
+    setTitle(""); setDescription(""); setRequesterNotes(""); setAssignedTo(""); setDueDate(""); setPriority("Normal");
     setImageFile(null); setImagePreview(null);
     setSubmitting(false);
     setConfirm(true);
@@ -583,6 +660,9 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
       </Field>
       <Field label="Description / brief">
         <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={4} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Specs, references, deadline context, brand notes…" />
+      </Field>
+      <Field label="Additional notes (optional)">
+        <textarea value={requesterNotes} onChange={(e) => setRequesterNotes(e.target.value)} rows={2} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Anything specific worth flagging separately from the brief…" />
       </Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Requested by">
@@ -600,11 +680,6 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
             {CONTENT_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        <Field label="Purpose">
-          <select value={purpose} onChange={(e) => setPurpose(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
-            {PURPOSES.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </Field>
         <Field label="Priority">
           <select value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -614,6 +689,16 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
           <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
         </Field>
       </div>
+      <Field label="Purpose (select all that apply)">
+        <div className="flex flex-wrap gap-3 mt-1">
+          {PURPOSES.map((p) => (
+            <label key={p} className="flex items-center gap-1.5 text-sm normal-case font-normal" style={{ color: "var(--ink)" }}>
+              <input type="checkbox" checked={purposes.includes(p)} onChange={() => togglePurpose(p)} />
+              {p}
+            </label>
+          ))}
+        </div>
+      </Field>
       <Field label="Assign to (optional — can be assigned later on the Board)">
         <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
           <option value="">— Unassigned —</option>
@@ -681,12 +766,15 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
   const [editing, setEditing] = useState(false);
   const [imageUrl, setImageUrl] = useState(null);
+  const [revisionPoint, setRevisionPoint] = useState("");
+  const [unitsInput, setUnitsInput] = useState(ticket.units || "");
 
   const [eTitle, setETitle] = useState(ticket.title);
   const [eDesc, setEDesc] = useState(ticket.description);
+  const [eNotes, setENotes] = useState(ticket.requesterNotes || "");
   const [eDept, setEDept] = useState(ticket.dept);
   const [eContentType, setEContentType] = useState(ticket.contentType || "Static");
-  const [ePurpose, setEPurpose] = useState(ticket.purpose || "Other");
+  const [ePurposes, setEPurposes] = useState(getPurposes(ticket));
   const [ePriority, setEPriority] = useState(ticket.priority);
   const [eDue, setEDue] = useState(ticket.dueDate || "");
 
@@ -700,6 +788,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const canEdit = isLead || isRequester;
   const revEq = revisionEquivalent(ticket);
   const acc = ticketAccuracy(ticket);
+  const toggleEPurpose = (p) => setEPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
 
   const assign = (memberId) => {
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, assignedTo: memberId, status: t.status === "New" ? "Assigned" : t.status }), { __label: `Assigned to ${nameOf(roster, memberId)}` }));
@@ -714,6 +803,19 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
       { __label: `${revType === "minor" ? "Minor" : "Major"} revision logged` }
     ));
     setNote("");
+  };
+  const addRevisionPoint = () => {
+    if (!revisionPoint.trim()) return;
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, revisionRequests: [...(t.revisionRequests || []), { id: uid(), note: revisionPoint, by: currentUser?.name, date: new Date().toISOString() }] }),
+      { __label: "Revision point noted by requester" }
+    ));
+    setRevisionPoint("");
+  };
+  const saveUnits = () => {
+    const n = Number(unitsInput);
+    if (!unitsInput || isNaN(n) || n <= 0) return;
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, units: n }), { __label: `Units set to ${n}` }));
   };
   const setCompliance = (v) => {
     setComp(v);
@@ -742,14 +844,16 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
     const changes = [];
     if (eTitle !== ticket.title) changes.push(`title "${ticket.title}" → "${eTitle}"`);
     if (eDesc !== ticket.description) changes.push(`description updated`);
+    if (eNotes !== (ticket.requesterNotes || "")) changes.push(`notes updated`);
     if (eDept !== ticket.dept) changes.push(`department ${ticket.dept} → ${eDept}`);
     if (eContentType !== ticket.contentType) changes.push(`content type ${ticket.contentType || "—"} → ${eContentType}`);
-    if (ePurpose !== ticket.purpose) changes.push(`purpose ${ticket.purpose || "—"} → ${ePurpose}`);
+    const oldPurposes = getPurposes(ticket);
+    if (JSON.stringify([...ePurposes].sort()) !== JSON.stringify([...oldPurposes].sort())) changes.push(`purposes ${oldPurposes.join(", ") || "—"} → ${ePurposes.join(", ") || "—"}`);
     if (ePriority !== ticket.priority) changes.push(`priority ${ticket.priority} → ${ePriority}`);
     if (eDue !== (ticket.dueDate || "")) changes.push(`due date ${ticket.dueDate || "—"} → ${eDue || "—"}`);
     if (changes.length === 0) { setEditing(false); return; }
     onUpdate(ticket.id, Object.assign(
-      (t) => ({ ...t, title: eTitle, description: eDesc, dept: eDept, contentType: eContentType, purpose: ePurpose, priority: ePriority, dueDate: eDue || null }),
+      (t) => ({ ...t, title: eTitle, description: eDesc, requesterNotes: eNotes, dept: eDept, contentType: eContentType, purposes: ePurposes, priority: ePriority, dueDate: eDue || null }),
       { __label: `Edited: ${changes.join("; ")}` }
     ));
     setEditing(false);
@@ -785,15 +889,28 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             <StampBadge priority={editing ? ePriority : ticket.priority} />
             <StatusPill status={ticket.status} />
             {!editing && ticket.contentType && <span className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{ticket.contentType}</span>}
-            {!editing && ticket.purpose && <span className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{ticket.purpose}</span>}
+            {!editing && getPurposes(ticket).map((p) => (
+              <span key={p} className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{p}</span>
+            ))}
           </div>
 
           {!editing ? (
-            ticket.description && <p className="text-sm mb-4">{ticket.description}</p>
+            <>
+              {ticket.description && <p className="text-sm mb-2">{ticket.description}</p>}
+              {ticket.requesterNotes && (
+                <div className="text-sm mb-4 p-2 rounded" style={{ background: "var(--paper)" }}>
+                  <span className="text-[11px] font-bold uppercase tracking-wide" style={{ color: "var(--muted)" }}>Requester notes: </span>
+                  {ticket.requesterNotes}
+                </div>
+              )}
+            </>
           ) : (
             <div className="space-y-3 mb-4 p-3 rounded border" style={{ borderColor: "var(--line)" }}>
               <Field label="Description">
                 <textarea value={eDesc} onChange={(e) => setEDesc(e.target.value)} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+              </Field>
+              <Field label="Requester notes">
+                <textarea value={eNotes} onChange={(e) => setENotes(e.target.value)} rows={2} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
               </Field>
               <div className="grid grid-cols-2 gap-2">
                 <Field label="Department">
@@ -811,15 +928,20 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                     {CONTENT_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </Field>
-                <Field label="Purpose">
-                  <select value={ePurpose} onChange={(e) => setEPurpose(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
-                    {PURPOSES.map((p) => <option key={p} value={p}>{p}</option>)}
-                  </select>
-                </Field>
                 <Field label="Due date">
                   <input type="date" value={eDue} onChange={(e) => setEDue(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
                 </Field>
               </div>
+              <Field label="Purpose (select all that apply)">
+                <div className="flex flex-wrap gap-3 mt-1">
+                  {PURPOSES.map((p) => (
+                    <label key={p} className="flex items-center gap-1.5 text-sm normal-case font-normal" style={{ color: "var(--ink)" }}>
+                      <input type="checkbox" checked={ePurposes.includes(p)} onChange={() => toggleEPurpose(p)} />
+                      {p}
+                    </label>
+                  ))}
+                </div>
+              </Field>
               <div className="flex gap-2">
                 <button onClick={saveEdits} className="flex items-center gap-1 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}><Save size={13} /> Save changes</button>
                 <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Cancel</button>
@@ -871,6 +993,27 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             </div>
           )}
 
+          {(ticket.revisionRequests || []).length > 0 && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <SectionTitle>Revision points from requester</SectionTitle>
+              <div className="mt-2 space-y-1.5 max-h-32 overflow-y-auto">
+                {ticket.revisionRequests.map((r) => (
+                  <div key={r.id} className="text-xs">{r.note} <span style={{ color: "var(--muted)" }}>— {r.by}, {new Date(r.date).toLocaleDateString()}</span></div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isRequester && !CLOSED_STATUSES.includes(ticket.status) && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <SectionTitle>Note a revision point</SectionTitle>
+              <div className="flex gap-2 mt-2">
+                <input value={revisionPoint} onChange={(e) => setRevisionPoint(e.target.value)} placeholder="What needs to change?" className="flex-1 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                <button onClick={addRevisionPoint} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><MessageSquarePlus size={13} /> Add</button>
+              </div>
+            </div>
+          )}
+
           {isLead && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Brief compliance (Team Lead rates 1–5)</SectionTitle>
@@ -882,8 +1025,26 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Your satisfaction rating (1–5)</SectionTitle>
               <StarRow value={sat} onChange={setSatisfaction} />
-              <button onClick={complete} disabled={!sat} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40" style={{ background: "var(--teal)" }}>
-                <CheckCircle2 size={14} /> Approve & complete
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Marking the project complete is done by the Team Lead/Admin, using this rating as one input.</div>
+            </div>
+          )}
+
+          {isLead && !CLOSED_STATUSES.includes(ticket.status) && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <SectionTitle>Units produced (Team Lead) — 1 project can count as multiple units</SectionTitle>
+              <div className="flex gap-2 mt-2 items-center">
+                <input type="number" min="1" value={unitsInput} onChange={(e) => setUnitsInput(e.target.value)} className="w-20 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                <button onClick={saveUnits} className="px-2 py-1 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Save units</button>
+                {ticket.units && <span className="text-xs" style={{ color: "var(--muted)" }}>Currently: {ticket.units}</span>}
+              </div>
+              <button
+                onClick={complete}
+                disabled={!ticket.units}
+                title={!ticket.units ? "Set units produced before marking complete" : ""}
+                className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40"
+                style={{ background: "var(--teal)" }}
+              >
+                <CheckCircle2 size={14} /> Mark as Completed
               </button>
             </div>
           )}
@@ -892,6 +1053,13 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Accuracy score</SectionTitle>
               <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: "var(--teal)" }}>{acc ?? "—"}<span className="text-sm">/100</span></div>
+              {ticket.units && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Units produced: {ticket.units}</div>}
+              {isLead && (
+                <div className="flex gap-2 items-center mt-2">
+                  <input type="number" min="1" value={unitsInput} onChange={(e) => setUnitsInput(e.target.value)} className="w-20 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                  <button onClick={saveUnits} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Correct units</button>
+                </div>
+              )}
               {isLead && (
                 <button onClick={reopen} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>
                   <AlertTriangle size={13} /> Reopen (mark as mistake)
@@ -948,6 +1116,7 @@ function StarRow({ value, onChange }) {
 }
 
 function ReportsView({ tickets, roster }) {
+  const [reportTab, setReportTab] = useState("completed"); // "completed" | "ongoing"
   const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "daily"
   const [month, setMonth] = useState(monthKey(todayISO()));
   const [day, setDay] = useState(todayISO());
@@ -968,12 +1137,27 @@ function ReportsView({ tickets, roster }) {
       const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
       const accs = done.map(ticketAccuracy).filter((a) => a !== null);
       const avgAcc = accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null;
-      return { name: m.name, completed: done.length, avgRev: Number(avgRev.toFixed(2)), avgAcc };
+      const totalUnits = done.reduce((s, t) => s + (t.units || 0), 0);
+      return { name: m.name, completed: done.length, avgRev: Number(avgRev.toFixed(2)), avgAcc, totalUnits };
     });
 
   const orgAccs = completedInPeriod.map(ticketAccuracy).filter((a) => a !== null);
   const orgAvgAcc = orgAccs.length ? Math.round(orgAccs.reduce((a, b) => a + b, 0) / orgAccs.length) : null;
   const orgAvgRev = completedInPeriod.length ? completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPeriod.length : 0;
+  const orgTotalUnits = completedInPeriod.reduce((s, t) => s + (t.units || 0), 0);
+
+  const ongoingByArtist = roster
+    .filter((m) => m.role === "Artist" || m.role === "Team Lead")
+    .map((m) => {
+      const mine = tickets.filter((t) => t.assignedTo === m.id && !CLOSED_STATUSES.includes(t.status));
+      return {
+        name: m.name,
+        total: mine.length,
+        overdue: mine.filter((t) => t.dueDate && t.status !== "On Hold" && t.dueDate < todayISO()).length,
+        onHold: mine.filter((t) => t.status === "On Hold").length,
+      };
+    });
+  const overallOngoing = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
 
   const trend = useMemo(() => {
     if (periodType === "monthly") {
@@ -1017,6 +1201,41 @@ function ReportsView({ tickets, roster }) {
 
   return (
     <div className="space-y-6">
+      <div className="flex border rounded overflow-hidden w-fit" style={{ borderColor: "var(--line)" }}>
+        <button onClick={() => setReportTab("completed")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "completed" ? "var(--ink)" : "white", color: reportTab === "completed" ? "white" : "var(--ink)" }}>Completed Report</button>
+        <button onClick={() => setReportTab("ongoing")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "ongoing" ? "var(--ink)" : "white", color: reportTab === "ongoing" ? "white" : "var(--ink)" }}>Ongoing Projects</button>
+      </div>
+
+      {reportTab === "ongoing" ? (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <StatCard label="Ongoing (overall)" value={overallOngoing.length} icon={KanbanSquare} />
+            <StatCard label="Overdue (overall)" value={overallOngoing.filter((t) => t.dueDate && t.status !== "On Hold" && t.dueDate < todayISO()).length} icon={AlertTriangle} />
+            <StatCard label="On hold (overall)" value={overallOngoing.filter((t) => t.status === "On Hold").length} icon={Clock} />
+          </div>
+          <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+            <SectionTitle>Ongoing projects — per team member</SectionTitle>
+            <table className="w-full text-sm mt-3">
+              <thead>
+                <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                  <th className="pb-2">Name</th><th className="pb-2">Ongoing</th><th className="pb-2">Overdue</th><th className="pb-2">On Hold</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ongoingByArtist.map((r) => (
+                  <tr key={r.name} className="border-t" style={{ borderColor: "var(--line)" }}>
+                    <td className="py-1.5 font-medium">{r.name}</td>
+                    <td className="py-1.5">{r.total}</td>
+                    <td className="py-1.5" style={{ color: r.overdue > 0 ? "var(--coral)" : "var(--ink)" }}>{r.overdue}</td>
+                    <td className="py-1.5">{r.onHold}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : (
+      <>
       <div className="flex flex-wrap items-center gap-3">
         <SectionTitle>Report period</SectionTitle>
         <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
@@ -1036,9 +1255,10 @@ function ReportsView({ tickets, roster }) {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Requests logged" value={requestedInPeriod.length} icon={FilePlus2} />
         <StatCard label="Completed" value={completedInPeriod.length} icon={CheckCircle2} />
+        <StatCard label="Units produced" value={orgTotalUnits} icon={Pencil} />
         <StatCard label="Avg accuracy" value={orgAvgAcc ?? "—"} icon={BarChart3} />
         <StatCard label="Avg revisions" value={orgAvgRev.toFixed(2)} icon={Pencil} />
         <StatCard label="Open priority items" value={tickets.filter((t) => t.status !== "Completed" && (t.priority === "High" || t.priority === "Urgent")).length} icon={Flag} />
@@ -1049,7 +1269,7 @@ function ReportsView({ tickets, roster }) {
         <table className="w-full text-sm mt-3">
           <thead>
             <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Completed</th><th className="pb-2">Avg revisions (major-eq.)</th><th className="pb-2">Avg accuracy</th>
+              <th className="pb-2">Name</th><th className="pb-2">Completed</th><th className="pb-2">Units</th><th className="pb-2">Avg revisions (major-eq.)</th><th className="pb-2">Avg accuracy</th>
             </tr>
           </thead>
           <tbody>
@@ -1057,6 +1277,7 @@ function ReportsView({ tickets, roster }) {
               <tr key={r.name} className="border-t" style={{ borderColor: "var(--line)" }}>
                 <td className="py-1.5 font-medium">{r.name}</td>
                 <td className="py-1.5">{r.completed}</td>
+                <td className="py-1.5">{r.totalUnits}</td>
                 <td className="py-1.5">{r.avgRev}</td>
                 <td className="py-1.5">{r.avgAcc ?? "—"}</td>
               </tr>
@@ -1106,6 +1327,8 @@ function ReportsView({ tickets, roster }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
+      </>
+      )}
     </div>
   );
 }
