@@ -842,6 +842,7 @@ function LeaderboardPanel({ tickets, roster }) {
     .slice(0, 5);
 
   const medalColor = ["#D9A441", "#A8A8A8", "#B08D57"];
+  const avatarSize = (i) => (i === 0 ? 52 : i === 1 ? 40 : i === 2 ? 36 : 28);
 
   return (
     <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
@@ -852,15 +853,20 @@ function LeaderboardPanel({ tickets, roster }) {
       {ranked.length === 0 ? (
         <EmptyState text="No completed projects yet — first one on the board wins." />
       ) : (
-        <div className="mt-3 space-y-2">
+        <div className="mt-3 space-y-3">
           {ranked.map((r, i) => (
-            <div key={r.member.id} className="flex items-center gap-3">
-              <div className="w-6 text-center font-black" style={{ fontFamily: "var(--font-display)", color: i < 3 ? medalColor[i] : "var(--muted)" }}>
-                {i < 3 ? <Trophy size={16} color={medalColor[i]} /> : i + 1}
+            <div key={r.member.id} className="flex items-center gap-3" style={{ opacity: i === 0 ? 1 : 0.92 }}>
+              <div className="w-6 text-center font-black flex-shrink-0" style={{ fontFamily: "var(--font-display)", color: i < 3 ? medalColor[i] : "var(--muted)" }}>
+                {i < 3 ? <Trophy size={i === 0 ? 20 : 16} color={medalColor[i]} /> : i + 1}
               </div>
-              <Avatar member={r.member} size={28} />
-              <div className="flex-1 text-sm font-semibold">{r.member.name}</div>
-              <div className="text-sm font-black" style={{ fontFamily: "var(--font-display)" }}>{r.completed}</div>
+              <div style={i === 0 ? { boxShadow: "0 0 0 3px var(--amber)", borderRadius: "9999px" } : {}}>
+                <Avatar member={r.member} size={avatarSize(i)} />
+              </div>
+              <div className="flex-1">
+                <div className={i === 0 ? "text-base font-black" : "text-sm font-semibold"} style={i === 0 ? { fontFamily: "var(--font-display)" } : {}}>{r.member.name}</div>
+                {i === 0 && <div className="text-[11px]" style={{ color: "var(--amber)" }}>Top performer</div>}
+              </div>
+              <div className={i === 0 ? "text-xl font-black" : "text-sm font-black"} style={{ fontFamily: "var(--font-display)" }}>{r.completed}</div>
             </div>
           ))}
         </div>
@@ -2059,11 +2065,11 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
       <div className="md:col-span-3 space-y-4">
         <div className="border rounded-md overflow-hidden" style={{ borderColor: "var(--line)" }}>
-          <div className="h-32 sm:h-40" style={cardBg} />
+          <div className="h-56 sm:h-72" style={cardBg} />
           <div className="bg-white px-4 pb-4 relative">
-            <div className="-mt-10 flex items-end gap-3 mb-2">
-              <div className="rounded-full" style={{ border: "4px solid white", background: "white" }}>
-                <Avatar member={selected} size={84} />
+            <div className="-mt-14 flex items-end gap-3 mb-2">
+              <div className="rounded-full" style={{ border: "5px solid white", background: "white" }}>
+                <Avatar member={selected} size={100} />
               </div>
               <div className="pb-1">
                 <div className="font-black text-xl leading-tight" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
