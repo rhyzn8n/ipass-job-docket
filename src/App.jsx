@@ -136,6 +136,39 @@ async function removeInspoImage(ticketId) {
   try { if (storage.remove) await storage.remove(`insp_${ticketId}`, true); } catch (e) {}
 }
 
+async function saveAvatar(memberId, dataUrl) {
+  try { await storage.set(`avatar_${memberId}`, dataUrl, true); } catch (e) {}
+}
+async function loadAvatar(memberId) {
+  try {
+    const res = await storage.get(`avatar_${memberId}`, true);
+    return res?.value || null;
+  } catch (e) { return null; }
+}
+async function removeAvatar(memberId) {
+  try { if (storage.remove) await storage.remove(`avatar_${memberId}`, true); } catch (e) {}
+}
+
+function Avatar({ member, size = 28 }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (member?.hasPhoto) loadAvatar(member.id).then((v) => { if (!cancelled) setUrl(v); });
+    else setUrl(null);
+    return () => { cancelled = true; };
+  }, [member?.id, member?.hasPhoto]);
+
+  if (url) {
+    return <img src={url} alt={member?.name || ""} className="rounded-full object-cover flex-shrink-0" style={{ width: size, height: size, border: "1px solid var(--line)" }} />;
+  }
+  const initial = (member?.name || "?").trim().charAt(0).toUpperCase();
+  return (
+    <div className="rounded-full flex items-center justify-center flex-shrink-0 font-bold" style={{ width: size, height: size, background: "var(--line)", color: "var(--ink)", fontSize: size * 0.45 }}>
+      {initial}
+    </div>
+  );
+}
+
 function StampBadge({ priority }) {
   return (
     <span
@@ -169,10 +202,14 @@ export default function CreativeOpsApp() {
   const [view, setView] = useState("dashboard");
   const [ready, setReady] = useState(false);
   const [openTicketId, setOpenTicketId] = useState(null);
+  const [bgColor, setBgColor] = useState("");
+  const [wallpaperUrl, setWallpaperUrl] = useState(null);
 
   useEffect(() => {
     let unsubRoster = null;
     let unsubTickets = null;
+    let unsubAppearance = null;
+    let unsubWallpaper = null;
     let lastKnownUserId = "";
 
     (async () => {
@@ -200,17 +237,38 @@ export default function CreativeOpsApp() {
         setReady(true);
       });
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
+      unsubAppearance = storage.subscribe("appearance", true, (val) => {
+        try {
+          const parsed = val ? JSON.parse(val) : {};
+          setBgColor(parsed.bgColor || "");
+        } catch (e) {}
+      });
+      unsubWallpaper = storage.subscribe("wallpaper_image", true, (val) => setWallpaperUrl(val || null));
     })();
 
     return () => {
       if (unsubRoster) unsubRoster();
       if (unsubTickets) unsubTickets();
+      if (unsubAppearance) unsubAppearance();
+      if (unsubWallpaper) unsubWallpaper();
     };
   }, []);
 
   const saveRoster = async (next) => {
     setRoster(next);
     try { await storage.set("roster", JSON.stringify(next), true); } catch (e) {}
+  };
+  const saveBgColor = async (color) => {
+    setBgColor(color);
+    try { await storage.set("appearance", JSON.stringify({ bgColor: color }), true); } catch (e) {}
+  };
+  const saveWallpaper = async (dataUrl) => {
+    setWallpaperUrl(dataUrl);
+    try { await storage.set("wallpaper_image", dataUrl, true); } catch (e) {}
+  };
+  const clearWallpaper = async () => {
+    setWallpaperUrl(null);
+    try { if (storage.remove) await storage.remove("wallpaper_image", true); } catch (e) {}
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
@@ -286,8 +344,16 @@ export default function CreativeOpsApp() {
     );
   }
 
+  const outerStyle = {
+    fontFamily: "var(--font-body)",
+    color: "var(--ink)",
+    ...(wallpaperUrl
+      ? { backgroundImage: `url(${wallpaperUrl})`, backgroundSize: "cover", backgroundPosition: "center", backgroundAttachment: "fixed" }
+      : { background: bgColor || "var(--paper)" }),
+  };
+
   return (
-    <div style={{ fontFamily: "var(--font-body)", background: "var(--paper)", color: "var(--ink)" }} className="min-h-[600px] w-full">
+    <div style={outerStyle} className="min-h-[600px] w-full">
       <FontStyles />
       <Header roster={roster} currentUserId={currentUserId} pickUser={pickUser} />
       <TabBar view={view} setView={setView} />
@@ -296,7 +362,17 @@ export default function CreativeOpsApp() {
         {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} />}
         {view === "board" && <BoardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
-        {view === "team" && <TeamView roster={roster} saveRoster={saveRoster} />}
+        {view === "team" && (
+          <TeamView
+            roster={roster}
+            saveRoster={saveRoster}
+            bgColor={bgColor}
+            saveBgColor={saveBgColor}
+            wallpaperUrl={wallpaperUrl}
+            saveWallpaper={saveWallpaper}
+            clearWallpaper={clearWallpaper}
+          />
+        )}
       </main>
       {openTicket && (
         <TicketModal
@@ -328,6 +404,7 @@ function FontStyles() {
 }
 
 function Header({ roster, currentUserId, pickUser }) {
+  const currentUser = roster.find((m) => m.id === currentUserId);
   return (
     <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
@@ -338,6 +415,7 @@ function Header({ roster, currentUserId, pickUser }) {
           <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
         </div>
         <label className="text-sm flex items-center gap-2" style={{ color: "var(--muted)" }}>
+          <Avatar member={currentUser} size={26} />
           Acting as
           <select value={currentUserId} onChange={(e) => pickUser(e.target.value)} className="border rounded px-2 py-1 text-sm bg-white" style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
             {roster.map((m) => <option key={m.id} value={m.id}>{m.name} — {m.role}</option>)}
@@ -1333,22 +1411,67 @@ function ReportsView({ tickets, roster }) {
   );
 }
 
-function TeamView({ roster, saveRoster }) {
+function TeamView({ roster, saveRoster, bgColor, saveBgColor, wallpaperUrl, saveWallpaper, clearWallpaper }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("Requester");
   const [dept, setDept] = useState("Other");
+  const [uploadingId, setUploadingId] = useState(null);
 
   const add = (e) => {
     e.preventDefault();
     if (!name.trim()) return;
-    saveRoster([...roster, { id: uid(), name, role, dept }]);
+    saveRoster([...roster, { id: uid(), name, role, dept, hasPhoto: false }]);
     setName("");
   };
   const update = (id, patch) => saveRoster(roster.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   const remove = (id) => saveRoster(roster.filter((m) => m.id !== id));
 
+  const handlePhoto = async (memberId, file) => {
+    if (!file) return;
+    setUploadingId(memberId);
+    const compressed = await compressImage(file, 300, 0.8);
+    await saveAvatar(memberId, compressed);
+    update(memberId, { hasPhoto: true });
+    setUploadingId(null);
+  };
+  const handleRemovePhoto = async (memberId) => {
+    await removeAvatar(memberId);
+    update(memberId, { hasPhoto: false });
+  };
+
+  const handleWallpaper = async (file) => {
+    if (!file) return;
+    const compressed = await compressImage(file, 1600, 0.75);
+    await saveWallpaper(compressed);
+  };
+
   return (
     <div className="space-y-5">
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Appearance</SectionTitle>
+        <div className="grid sm:grid-cols-2 gap-4 mt-3">
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Background color</div>
+            <div className="flex items-center gap-2">
+              <input type="color" value={bgColor || "#F3F1EA"} onChange={(e) => saveBgColor(e.target.value)} className="w-10 h-8 border rounded" style={{ borderColor: "var(--line)" }} />
+              <button onClick={() => saveBgColor("")} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--line)" }}>Reset default</button>
+            </div>
+            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Applies when no wallpaper is set. Visible to the whole team.</div>
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Wallpaper image</div>
+            <input type="file" accept="image/*" onChange={(e) => handleWallpaper(e.target.files?.[0])} className="text-sm" />
+            {wallpaperUrl && (
+              <div className="mt-2 flex items-center gap-2">
+                <img src={wallpaperUrl} alt="wallpaper preview" className="h-14 rounded border" style={{ borderColor: "var(--line)" }} />
+                <button onClick={clearWallpaper} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Remove wallpaper</button>
+              </div>
+            )}
+            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Overrides the background color when set. Visible to the whole team.</div>
+          </div>
+        </div>
+      </div>
+
       <form onSubmit={add} className="bg-white border rounded-md p-4 flex flex-wrap gap-2 items-end" style={{ borderColor: "var(--line)" }}>
         <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} /></Field>
         <Field label="Role">
@@ -1368,11 +1491,20 @@ function TeamView({ roster, saveRoster }) {
         <SectionTitle>Team roster</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Name</th><th className="pb-2">Role</th><th className="pb-2">Dept</th><th className="pb-2"></th></tr>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Photo</th><th className="pb-2">Name</th><th className="pb-2">Role</th><th className="pb-2">Dept</th><th className="pb-2"></th></tr>
           </thead>
           <tbody>
             {roster.map((m) => (
               <tr key={m.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                <td className="py-1.5">
+                  <label className="cursor-pointer flex items-center gap-1.5">
+                    <Avatar member={m} size={32} />
+                    <input type="file" accept="image/*" className="hidden" onChange={(e) => handlePhoto(m.id, e.target.files?.[0])} />
+                    <Pencil size={11} color="var(--muted)" />
+                  </label>
+                  {uploadingId === m.id && <div className="text-[10px]" style={{ color: "var(--muted)" }}>uploading…</div>}
+                  {m.hasPhoto && <button onClick={() => handleRemovePhoto(m.id)} className="text-[10px]" style={{ color: "var(--coral)" }}>remove</button>}
+                </td>
                 <td className="py-1.5"><input value={m.name} onChange={(e) => update(m.id, { name: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} /></td>
                 <td className="py-1.5">
                   <select value={m.role} onChange={(e) => update(m.id, { role: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
