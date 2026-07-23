@@ -10,7 +10,9 @@ import {
 } from "recharts";
 import { storage, ticketsApi } from "./firebase.js";
 
-const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "Review", "Completed"];
+const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
+const CLOSED_STATUSES = ["Completed", "Cancelled"];
+const PAUSED_STATUSES = ["On Hold", "Completed", "Cancelled"]; // excluded from overdue alerts
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 const DEPTS = ["Social Media", "SEO", "Other"];
 const ROLES = ["Requester", "Artist", "Team Lead", "Admin"];
@@ -143,8 +145,10 @@ function StatusPill({ status }) {
     Assigned: "bg-[var(--amber)]/20 text-[var(--ink)]",
     "In Progress": "bg-[var(--amber)]/40 text-[var(--ink)]",
     "In Revision": "bg-[var(--coral)]/20 text-[var(--ink)]",
+    "On Hold": "bg-[var(--muted)]/30 text-[var(--ink)]",
     Review: "bg-[var(--teal)]/20 text-[var(--ink)]",
     Completed: "bg-[var(--teal)] text-[var(--paper)]",
+    Cancelled: "bg-[var(--coral)] text-[var(--paper)]",
   };
   return <span className={`px-2 py-0.5 text-[11px] font-semibold rounded ${map[status] || ""}`}>{status}</span>;
 }
@@ -359,7 +363,7 @@ function TabBar({ view, setView }) {
 }
 
 function TicketCard({ ticket, roster, onOpen }) {
-  const overdue = ticket.dueDate && ticket.status !== "Completed" && ticket.dueDate < todayISO();
+  const overdue = ticket.dueDate && !PAUSED_STATUSES.includes(ticket.status) && ticket.dueDate < todayISO();
   return (
     <button onClick={() => onOpen(ticket.id)} className="text-left w-full bg-white rounded-md shadow-sm border hover:shadow-md transition-shadow" style={{ borderColor: "var(--line)" }}>
       <div className="docket-perf" />
@@ -385,26 +389,32 @@ function TicketCard({ ticket, roster, onOpen }) {
 }
 
 function DashboardView({ tickets, roster, onOpen, setView }) {
-  const open = tickets.filter((t) => t.status !== "Completed");
-  const overdue = open.filter((t) => t.dueDate && t.dueDate < todayISO());
+  const open = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
+  const overdue = open.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO());
+  const onHold = tickets.filter((t) => t.status === "On Hold");
+  const cancelled = tickets.filter((t) => t.status === "Cancelled");
   const recent = tickets
     .flatMap((t) => t.history.map((h) => ({ ...h, ticket: t })))
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, 8);
+  const recentlyClosed = tickets
+    .filter((t) => CLOSED_STATUSES.includes(t.status))
+    .sort((a, b) => new Date(b.history[b.history.length - 1]?.date || 0) - new Date(a.history[a.history.length - 1]?.date || 0))
+    .slice(0, 4);
 
   const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const memberStats = members.map((m) => {
     const mine = tickets.filter((t) => t.assignedTo === m.id);
     return {
       name: m.name,
-      ongoing: mine.filter((t) => t.status !== "Completed").length,
+      ongoing: mine.filter((t) => !CLOSED_STATUSES.includes(t.status)).length,
       completed: mine.filter((t) => t.status === "Completed").length,
-      overdue: mine.filter((t) => t.status !== "Completed" && t.dueDate && t.dueDate < todayISO()).length,
+      overdue: mine.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO()).length,
     };
   });
-  const overallOngoing = tickets.filter((t) => t.status !== "Completed").length;
+  const overallOngoing = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status)).length;
   const overallCompleted = tickets.filter((t) => t.status === "Completed").length;
-  const overallOverdue = tickets.filter((t) => t.status !== "Completed" && t.dueDate && t.dueDate < todayISO()).length;
+  const overallOverdue = tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO()).length;
 
   const staticCount = tickets.filter((t) => t.contentType === "Static").length;
   const videoCount = tickets.filter((t) => t.contentType === "Video").length;
@@ -412,12 +422,23 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Open tickets" value={open.length} icon={KanbanSquare} />
         <StatCard label="Overdue" value={overdue.length} icon={AlertTriangle} alert={overdue.length > 0} />
         <StatCard label="Urgent priority" value={open.filter((t) => t.priority === "Urgent").length} icon={Flag} />
+        <StatCard label="On hold" value={onHold.length} icon={Clock} />
+        <StatCard label="Cancelled" value={cancelled.length} icon={X} />
         <StatCard label="Completed total" value={tickets.filter((t) => t.status === "Completed").length} icon={CheckCircle2} />
       </div>
+
+      {recentlyClosed.length > 0 && (
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Recently completed / cancelled — click to reopen or review</SectionTitle>
+          <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+            {recentlyClosed.map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
+          </div>
+        </div>
+      )}
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
         <SectionTitle>Ongoing, completed & overdue — per team member</SectionTitle>
@@ -706,8 +727,16 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO() }), { __label: "Approved & completed" }));
   };
   const reopen = () => {
-    if (!window.confirm("Reopen this ticket? It will move back to Review and drop out of completed stats until re-approved.")) return;
-    onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Review", dateCompleted: null }), { __label: "Reopened — marked complete by mistake" }));
+    const wasCompleted = ticket.status === "Completed";
+    const nextStatus = wasCompleted ? "Review" : ticket.assignedTo ? "Assigned" : "New";
+    const msg = wasCompleted
+      ? "Reopen this ticket? It will move back to Review and drop out of completed stats until re-approved."
+      : "Reopen this cancelled ticket? It will move back into active work.";
+    if (!window.confirm(msg)) return;
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, status: nextStatus, dateCompleted: null }),
+      { __label: wasCompleted ? "Reopened — marked complete by mistake" : "Reopened from Cancelled" }
+    ));
   };
   const saveEdits = () => {
     const changes = [];
@@ -827,7 +856,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             </div>
           )}
 
-          {(isAssignee || isLead) && ticket.status !== "Completed" && (
+          {(isAssignee || isLead) && !CLOSED_STATUSES.includes(ticket.status) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Log a revision</SectionTitle>
               <div className="flex gap-2 mt-2">
@@ -849,7 +878,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             </div>
           )}
 
-          {isRequester && ticket.status !== "Completed" && (
+          {isRequester && !CLOSED_STATUSES.includes(ticket.status) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Your satisfaction rating (1–5)</SectionTitle>
               <StarRow value={sat} onChange={setSatisfaction} />
@@ -868,6 +897,14 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                   <AlertTriangle size={13} /> Reopen (mark as mistake)
                 </button>
               )}
+            </div>
+          )}
+
+          {ticket.status === "Cancelled" && isLead && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <button onClick={reopen} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>
+                <AlertTriangle size={13} /> Reopen cancelled ticket
+              </button>
             </div>
           )}
 
