@@ -495,6 +495,7 @@ export default function CreativeOpsApp() {
           <TeamSpaceView
             roster={roster}
             currentUser={currentUser}
+            isLead={isLead}
             endorsements={endorsements}
             addEndorsement={addEndorsement}
             deleteEndorsement={deleteEndorsement}
@@ -1872,22 +1873,23 @@ function ReportsView({ tickets, roster }) {
   );
 }
 
-function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, deleteEndorsement, saveRoster }) {
+function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorsement, deleteEndorsement, saveRoster }) {
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
   const [profileWallpaper, setProfileWallpaper] = useState(null);
-  const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", wishlist: "", quote: "" });
+  const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", favoriteMusic: "", wishlist: "", quote: "" });
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
+  const canEdit = isSelf || isLead;
   const mine = endorsements.filter((e) => e.toMemberId === selected?.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   useEffect(() => {
     if (selected) {
       setForm({
         bio: selected.bio || "", likes: selected.likes || "", mobile: selected.mobile || "",
-        email: selected.email || "", favoriteFood: selected.favoriteFood || "",
+        email: selected.email || "", favoriteFood: selected.favoriteFood || "", favoriteMusic: selected.favoriteMusic || "",
         wishlist: selected.wishlist || "", quote: selected.quote || "",
       });
       if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
@@ -1945,20 +1947,21 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
 
       <div className="md:col-span-3 space-y-4">
         <div className="border rounded-md overflow-hidden" style={{ borderColor: "var(--line)" }}>
-          <div className="p-4" style={{ ...cardBg, background: profileWallpaper ? undefined : "var(--paper)" }}>
-            <div className="flex items-center gap-3 bg-white/90 rounded-md p-2 w-fit">
-              <Avatar member={selected} size={48} />
+          <div className="h-44 sm:h-56 relative flex items-end" style={{ ...cardBg, background: profileWallpaper ? undefined : "var(--line)" }}>
+            <div className="absolute inset-0" style={{ background: profileWallpaper ? "linear-gradient(to top, rgba(0,0,0,0.55), rgba(0,0,0,0))" : "none" }} />
+            <div className="relative flex items-center gap-3 p-4">
+              <Avatar member={selected} size={64} />
               <div>
-                <div className="font-black text-lg" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
-                <div className="text-xs" style={{ color: "var(--muted)" }}>{selected.role} · {selected.dept}</div>
+                <div className="font-black text-xl" style={{ fontFamily: "var(--font-display)", color: profileWallpaper ? "white" : "var(--ink)" }}>{selected.name}</div>
+                <div className="text-xs" style={{ color: profileWallpaper ? "rgba(255,255,255,0.85)" : "var(--muted)" }}>{selected.role} · {selected.dept}</div>
               </div>
             </div>
           </div>
 
           <div className="bg-white p-4">
-            {isSelf && !editingBio && (
+            {canEdit && !editingBio && (
               <button onClick={() => setEditingBio(true)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={{ color: "var(--teal)" }}>
-                <Pencil size={12} /> Edit my profile
+                <Pencil size={12} /> {isSelf ? "Edit my profile" : `Edit ${selected.name}'s profile (Team Lead)`}
               </button>
             )}
 
@@ -1969,6 +1972,7 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
                 <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-xs pt-2" style={{ color: "var(--muted)" }}>
                   {selected.likes && <div><b style={{ color: "var(--ink)" }}>Likes:</b> {selected.likes}</div>}
                   {selected.favoriteFood && <div><b style={{ color: "var(--ink)" }}>Favorite food:</b> {selected.favoriteFood}</div>}
+                  {selected.favoriteMusic && <div><b style={{ color: "var(--ink)" }}>Favorite music:</b> {selected.favoriteMusic}</div>}
                   {selected.wishlist && <div><b style={{ color: "var(--ink)" }}>Wishlist:</b> {selected.wishlist}</div>}
                   {selected.mobile && <div><b style={{ color: "var(--ink)" }}>Mobile:</b> {selected.mobile}</div>}
                   {selected.email && <div><b style={{ color: "var(--ink)" }}>Email:</b> {selected.email}</div>}
@@ -1994,6 +1998,9 @@ function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, dele
                   </Field>
                   <Field label="Favorite food">
                     <input value={form.favoriteFood} onChange={(e) => setField("favoriteFood", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                  </Field>
+                  <Field label="Favorite music">
+                    <input value={form.favoriteMusic} onChange={(e) => setField("favoriteMusic", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Artists, genres, a song…" />
                   </Field>
                   <Field label="Wishlist">
                     <input value={form.wishlist} onChange={(e) => setField("wishlist", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
