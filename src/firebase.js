@@ -79,3 +79,7 @@ function makeCollectionApi(collectionName) {
 
 export const ticketsApi = makeCollectionApi("tickets_v2");
 export const chatApi = makeCollectionApi("chat_messages");
+// Roster gets the same per-document treatment: editing one person's profile
+// (photo, bio, contact info, wallpaper) can never silently overwrite another
+// person's data, or a second edit to the same person made moments apart.
+export const rosterApi = makeCollectionApi("roster_v2");
