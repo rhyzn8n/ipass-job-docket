@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
-  MessageSquarePlus, Star, ChevronRight
+  MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -14,9 +14,11 @@ const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "Review", "Co
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 const DEPTS = ["Social Media", "SEO", "Other"];
 const ROLES = ["Requester", "Artist", "Team Lead", "Admin"];
+const CONTENT_TYPES = ["Static", "Video"];
+const PURPOSES = ["Ads", "YouTube", "TikTok", "Facebook/IG", "Website", "Other"];
 
 const PRIORITY_COLOR = { Low: "var(--muted)", Normal: "var(--teal)", High: "var(--amber)", Urgent: "var(--coral)" };
-const PIE_COLORS = ["var(--amber)", "var(--teal)", "var(--coral)", "var(--muted)"];
+const PIE_COLORS = ["var(--amber)", "var(--teal)", "var(--coral)", "var(--muted)", "#7A6FB0", "#4C8FBD"];
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (isoDate) => (isoDate ? isoDate.slice(0, 7) : "");
@@ -47,6 +49,83 @@ function seedRoster() {
   ];
 }
 
+function nameOf(roster, id) {
+  return roster.find((m) => m.id === id)?.name || "Unassigned";
+}
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function ticketsToCSV(list, roster) {
+  const headers = [
+    "Ticket No", "Title", "Department", "Content Type", "Purpose", "Requested By", "Assigned To",
+    "Priority", "Status", "Date Requested", "Due Date", "Date Completed",
+    "Minor Revisions", "Major Revisions", "Revision Equivalent", "Satisfaction", "Brief Compliance", "Accuracy",
+  ];
+  const rows = list.map((t) => {
+    const minor = t.revisions.filter((r) => r.type === "minor").length;
+    const major = t.revisions.filter((r) => r.type === "major").length;
+    return [
+      t.ticketNo, t.title, t.dept, t.contentType || "", t.purpose || "",
+      nameOf(roster, t.requestedBy), nameOf(roster, t.assignedTo),
+      t.priority, t.status, t.dateRequested, t.dueDate || "", t.dateCompleted || "",
+      minor, major, revisionEquivalent(t).toFixed(2),
+      t.satisfactionScore || "", t.briefCompliance || "", ticketAccuracy(t) ?? "",
+    ].map(csvEscape).join(",");
+  });
+  return [headers.join(","), ...rows].join("\n");
+}
+
+function downloadCSV(csv, filename) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function compressImage(file, maxWidth = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function saveInspoImage(ticketId, dataUrl) {
+  try { await storage.set(`insp_${ticketId}`, dataUrl, true); } catch (e) {}
+}
+async function loadInspoImage(ticketId) {
+  try {
+    const res = await storage.get(`insp_${ticketId}`, true);
+    return res?.value || null;
+  } catch (e) { return null; }
+}
+async function removeInspoImage(ticketId) {
+  try { if (storage.remove) await storage.remove(`insp_${ticketId}`, true); } catch (e) {}
+}
+
 function StampBadge({ priority }) {
   return (
     <span
@@ -67,15 +146,7 @@ function StatusPill({ status }) {
     Review: "bg-[var(--teal)]/20 text-[var(--ink)]",
     Completed: "bg-[var(--teal)] text-[var(--paper)]",
   };
-  return (
-    <span className={`px-2 py-0.5 text-[11px] font-semibold rounded ${map[status] || ""}`}>
-      {status}
-    </span>
-  );
-}
-
-function nameOf(roster, id) {
-  return roster.find((m) => m.id === id)?.name || "Unassigned";
+  return <span className={`px-2 py-0.5 text-[11px] font-semibold rounded ${map[status] || ""}`}>{status}</span>;
 }
 
 export default function CreativeOpsApp() {
@@ -150,14 +221,17 @@ export default function CreativeOpsApp() {
     saveTickets(next);
   };
 
-  const createTicket = (data) => {
+  const createTicket = async (data) => {
     const nextSeq = ticketSeq + 1;
+    const newId = uid();
     const t = {
-      id: uid(),
+      id: newId,
       ticketNo: nextSeq,
       title: data.title,
       description: data.description,
       dept: data.dept,
+      contentType: data.contentType,
+      purpose: data.purpose,
       requestedBy: data.requestedBy,
       assignedTo: data.assignedTo || null,
       priority: data.priority,
@@ -168,11 +242,20 @@ export default function CreativeOpsApp() {
       revisions: [],
       satisfactionScore: null,
       briefCompliance: null,
+      hasImage: !!data.imageDataUrl,
       history: [{ date: new Date().toISOString(), action: "Request logged", by: currentUser?.name || "Unknown" }],
     };
-    saveTickets([t, ...tickets]);
-    saveSeq(nextSeq);
+    await saveTickets([t, ...tickets]);
+    await saveSeq(nextSeq);
+    if (data.imageDataUrl) await saveInspoImage(newId, data.imageDataUrl);
     setView("board");
+  };
+
+  const deleteTicket = async (id) => {
+    const t = tickets.find((x) => x.id === id);
+    await saveTickets(tickets.filter((x) => x.id !== id));
+    if (t?.hasImage) await removeInspoImage(id);
+    setOpenTicketId(null);
   };
 
   const openTicket = tickets.find((t) => t.id === openTicketId);
@@ -193,13 +276,7 @@ export default function CreativeOpsApp() {
       <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto">
         {view === "dashboard" && <DashboardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} setView={setView} />}
         {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} />}
-        {view === "board" && (
-          <BoardView
-            tickets={tickets}
-            roster={roster}
-            onOpen={setOpenTicketId}
-          />
-        )}
+        {view === "board" && <BoardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
         {view === "team" && <TeamView roster={roster} saveRoster={saveRoster} />}
       </main>
@@ -211,6 +288,7 @@ export default function CreativeOpsApp() {
           isLead={isLead}
           onClose={() => setOpenTicketId(null)}
           onUpdate={updateTicket}
+          onDelete={deleteTicket}
         />
       )}
     </div>
@@ -222,23 +300,11 @@ function FontStyles() {
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@700;900&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
       :root {
-        --paper: #F3F1EA;
-        --ink: #221F26;
-        --amber: #D99A2B;
-        --teal: #2E6B60;
-        --coral: #C6543D;
-        --line: #DAD5C7;
-        --muted: #8C8672;
-        --font-display: 'Archivo', sans-serif;
-        --font-body: 'IBM Plex Sans', sans-serif;
-        --font-mono: 'IBM Plex Mono', monospace;
+        --paper: #F3F1EA; --ink: #221F26; --amber: #D99A2B; --teal: #2E6B60; --coral: #C6543D;
+        --line: #DAD5C7; --muted: #8C8672;
+        --font-display: 'Archivo', sans-serif; --font-body: 'IBM Plex Sans', sans-serif; --font-mono: 'IBM Plex Mono', monospace;
       }
-      .docket-perf {
-        height: 10px;
-        background-image: radial-gradient(circle, var(--paper) 3.2px, transparent 3.6px);
-        background-size: 14px 100%;
-        background-position: center;
-      }
+      .docket-perf { height: 10px; background-image: radial-gradient(circle, var(--paper) 3.2px, transparent 3.6px); background-size: 14px 100%; background-position: center; }
     `}</style>
   );
 }
@@ -251,21 +317,12 @@ function Header({ roster, currentUserId, pickUser }) {
           <div className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
             IPASS · Creative Production
           </div>
-          <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>
-            Job Docket
-          </h1>
+          <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
         </div>
         <label className="text-sm flex items-center gap-2" style={{ color: "var(--muted)" }}>
           Acting as
-          <select
-            value={currentUserId}
-            onChange={(e) => pickUser(e.target.value)}
-            className="border rounded px-2 py-1 text-sm bg-white"
-            style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}
-          >
-            {roster.map((m) => (
-              <option key={m.id} value={m.id}>{m.name} — {m.role}</option>
-            ))}
+          <select value={currentUserId} onChange={(e) => pickUser(e.target.value)} className="border rounded px-2 py-1 text-sm bg-white" style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
+            {roster.map((m) => <option key={m.id} value={m.id}>{m.name} — {m.role}</option>)}
           </select>
         </label>
       </div>
@@ -288,15 +345,7 @@ function TabBar({ view, setView }) {
           const Icon = t.icon;
           const active = view === t.id;
           return (
-            <button
-              key={t.id}
-              onClick={() => setView(t.id)}
-              className="flex items-center gap-1.5 px-3 py-3 text-sm font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors"
-              style={{
-                borderColor: active ? "var(--amber)" : "transparent",
-                color: active ? "var(--ink)" : "var(--muted)",
-              }}
-            >
+            <button key={t.id} onClick={() => setView(t.id)} className="flex items-center gap-1.5 px-3 py-3 text-sm font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors" style={{ borderColor: active ? "var(--amber)" : "transparent", color: active ? "var(--ink)" : "var(--muted)" }}>
               <Icon size={15} /> {t.label}
             </button>
           );
@@ -313,13 +362,16 @@ function TicketCard({ ticket, roster, onOpen }) {
       <div className="docket-perf" />
       <div className="p-3">
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
-            JOB-{String(ticket.ticketNo).padStart(4, "0")}
-          </span>
-          <StampBadge priority={ticket.priority} />
+          <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(ticket.ticketNo).padStart(4, "0")}</span>
+          <div className="flex items-center gap-1">
+            {ticket.hasImage && <ImageIcon size={12} color="var(--muted)" />}
+            <StampBadge priority={ticket.priority} />
+          </div>
         </div>
         <div className="font-semibold text-sm leading-snug mb-1">{ticket.title}</div>
-        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>{ticket.dept} · {nameOf(roster, ticket.assignedTo)}</div>
+        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+          {ticket.dept} · {ticket.contentType || "—"}{ticket.purpose ? ` · ${ticket.purpose}` : ""} · {nameOf(roster, ticket.assignedTo)}
+        </div>
         <div className="flex items-center justify-between">
           <StatusPill status={ticket.status} />
           {overdue && <span className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "var(--coral)" }}><AlertTriangle size={12} /> overdue</span>}
@@ -332,11 +384,28 @@ function TicketCard({ ticket, roster, onOpen }) {
 function DashboardView({ tickets, roster, onOpen, setView }) {
   const open = tickets.filter((t) => t.status !== "Completed");
   const overdue = open.filter((t) => t.dueDate && t.dueDate < todayISO());
-  const byPriority = PRIORITIES.map((p) => ({ name: p, value: open.filter((t) => t.priority === p).length }));
   const recent = tickets
     .flatMap((t) => t.history.map((h) => ({ ...h, ticket: t })))
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, 8);
+
+  const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+  const memberStats = members.map((m) => {
+    const mine = tickets.filter((t) => t.assignedTo === m.id);
+    return {
+      name: m.name,
+      ongoing: mine.filter((t) => t.status !== "Completed").length,
+      completed: mine.filter((t) => t.status === "Completed").length,
+      overdue: mine.filter((t) => t.status !== "Completed" && t.dueDate && t.dueDate < todayISO()).length,
+    };
+  });
+  const overallOngoing = tickets.filter((t) => t.status !== "Completed").length;
+  const overallCompleted = tickets.filter((t) => t.status === "Completed").length;
+  const overallOverdue = tickets.filter((t) => t.status !== "Completed" && t.dueDate && t.dueDate < todayISO()).length;
+
+  const staticCount = tickets.filter((t) => t.contentType === "Static").length;
+  const videoCount = tickets.filter((t) => t.contentType === "Video").length;
+  const byPurpose = PURPOSES.map((p) => ({ name: p, value: tickets.filter((t) => t.purpose === p).length })).filter((p) => p.value > 0);
 
   return (
     <div className="space-y-6">
@@ -347,12 +416,37 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
         <StatCard label="Completed total" value={tickets.filter((t) => t.status === "Completed").length} icon={CheckCircle2} />
       </div>
 
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Ongoing, completed & overdue — per team member</SectionTitle>
+        <table className="w-full text-sm mt-3">
+          <thead>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+              <th className="pb-2">Name</th><th className="pb-2">Ongoing</th><th className="pb-2">Completed</th><th className="pb-2">Overdue</th>
+            </tr>
+          </thead>
+          <tbody>
+            {memberStats.map((m) => (
+              <tr key={m.name} className="border-t" style={{ borderColor: "var(--line)" }}>
+                <td className="py-1.5 font-medium">{m.name}</td>
+                <td className="py-1.5">{m.ongoing}</td>
+                <td className="py-1.5">{m.completed}</td>
+                <td className="py-1.5" style={{ color: m.overdue > 0 ? "var(--coral)" : "var(--ink)" }}>{m.overdue}</td>
+              </tr>
+            ))}
+            <tr className="border-t-2 font-bold" style={{ borderColor: "var(--ink)" }}>
+              <td className="py-1.5">Overall</td>
+              <td className="py-1.5">{overallOngoing}</td>
+              <td className="py-1.5">{overallCompleted}</td>
+              <td className="py-1.5" style={{ color: overallOverdue > 0 ? "var(--coral)" : "var(--ink)" }}>{overallOverdue}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
       <div className="grid md:grid-cols-3 gap-4">
         <div className="md:col-span-2 bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
           <SectionTitle>Priority board — open jobs</SectionTitle>
-          {open.length === 0 ? (
-            <EmptyState text="No open jobs. New requests will land here." />
-          ) : (
+          {open.length === 0 ? <EmptyState text="No open jobs. New requests will land here." /> : (
             <div className="grid sm:grid-cols-2 gap-3 mt-3">
               {open.slice(0, 6).map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
             </div>
@@ -371,12 +465,32 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
             {recent.map((h, i) => (
               <div key={i} className="text-xs">
                 <div className="font-semibold">{h.action}</div>
-                <div style={{ color: "var(--muted)" }}>
-                  JOB-{String(h.ticket.ticketNo).padStart(4, "0")} · {h.by} · {new Date(h.date).toLocaleDateString()}
-                </div>
+                <div style={{ color: "var(--muted)" }}>JOB-{String(h.ticket.ticketNo).padStart(4, "0")} · {h.by} · {new Date(h.date).toLocaleDateString()}</div>
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Content type mix (all-time)</SectionTitle>
+          <div className="flex gap-4 mt-3">
+            <StatCard label="Static" value={staticCount} icon={ImageIcon} />
+            <StatCard label="Video" value={videoCount} icon={ImageIcon} />
+          </div>
+        </div>
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Requests by purpose</SectionTitle>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={byPurpose}>
+              <CartesianGrid stroke="var(--line)" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip />
+              <Bar dataKey="value" fill="var(--teal)" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
       </div>
     </div>
@@ -385,13 +499,9 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
 
 function StatCard({ label, value, icon: Icon, alert }) {
   return (
-    <div className="bg-white border rounded-md p-3" style={{ borderColor: alert ? "var(--coral)" : "var(--line)" }}>
-      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--muted)" }}>
-        <Icon size={13} /> {label}
-      </div>
-      <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: alert ? "var(--coral)" : "var(--ink)" }}>
-        {value}
-      </div>
+    <div className="bg-white border rounded-md p-3 flex-1" style={{ borderColor: alert ? "var(--coral)" : "var(--line)" }}>
+      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--muted)" }}><Icon size={13} /> {label}</div>
+      <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: alert ? "var(--coral)" : "var(--ink)" }}>{value}</div>
     </div>
   );
 }
@@ -408,19 +518,35 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [dept, setDept] = useState(currentUser?.dept || "Social Media");
+  const [contentType, setContentType] = useState("Static");
+  const [purpose, setPurpose] = useState("Ads");
   const [requestedBy, setRequestedBy] = useState(currentUser?.id || "");
   const [assignedTo, setAssignedTo] = useState("");
   const [priority, setPriority] = useState("Normal");
   const [dueDate, setDueDate] = useState("");
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const [confirm, setConfirm] = useState(false);
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
 
-  const submit = (e) => {
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImageFile(file);
+    const compressed = await compressImage(file);
+    setImagePreview(compressed);
+  };
+
+  const submit = async (e) => {
     e.preventDefault();
     if (!title.trim() || !requestedBy) return;
-    onCreate({ title, description, dept, requestedBy, assignedTo, priority, dueDate });
+    setSubmitting(true);
+    await onCreate({ title, description, dept, contentType, purpose, requestedBy, assignedTo, priority, dueDate, imageDataUrl: imagePreview });
     setTitle(""); setDescription(""); setAssignedTo(""); setDueDate(""); setPriority("Normal");
+    setImageFile(null); setImagePreview(null);
+    setSubmitting(false);
     setConfirm(true);
     setTimeout(() => setConfirm(false), 2500);
   };
@@ -445,6 +571,16 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
             {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </Field>
+        <Field label="Content type">
+          <select value={contentType} onChange={(e) => setContentType(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
+            {CONTENT_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Purpose">
+          <select value={purpose} onChange={(e) => setPurpose(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
+            {PURPOSES.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </Field>
         <Field label="Priority">
           <select value={priority} onChange={(e) => setPriority(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -460,8 +596,12 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
           {artists.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
         </select>
       </Field>
-      <button type="submit" className="flex items-center gap-2 px-4 py-2 rounded font-semibold text-sm text-white" style={{ background: "var(--ink)" }}>
-        <Send size={14} /> Log request
+      <Field label="Inspiration image (optional)">
+        <input type="file" accept="image/*" onChange={handleFile} className="text-sm" />
+        {imagePreview && <img src={imagePreview} alt="preview" className="mt-2 max-h-32 rounded border" style={{ borderColor: "var(--line)" }} />}
+      </Field>
+      <button type="submit" disabled={submitting} className="flex items-center gap-2 px-4 py-2 rounded font-semibold text-sm text-white disabled:opacity-50" style={{ background: "var(--ink)" }}>
+        <Send size={14} /> {submitting ? "Logging…" : "Log request"}
       </button>
       {confirm && <div className="text-sm font-semibold" style={{ color: "var(--teal)" }}>Request logged.</div>}
     </form>
@@ -480,9 +620,7 @@ function Field({ label, children }) {
 function BoardView({ tickets, roster, onOpen }) {
   const [filterAssignee, setFilterAssignee] = useState("");
   const [filterPriority, setFilterPriority] = useState("");
-  const filtered = tickets.filter(
-    (t) => (!filterAssignee || t.assignedTo === filterAssignee) && (!filterPriority || t.priority === filterPriority)
-  );
+  const filtered = tickets.filter((t) => (!filterAssignee || t.assignedTo === filterAssignee) && (!filterPriority || t.priority === filterPriority));
   return (
     <div>
       <div className="flex flex-wrap gap-3 mb-4 items-center">
@@ -503,9 +641,7 @@ function BoardView({ tickets, roster, onOpen }) {
               {s} <span>{filtered.filter((t) => t.status === s).length}</span>
             </div>
             <div className="space-y-2">
-              {filtered.filter((t) => t.status === s).map((t) => (
-                <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />
-              ))}
+              {filtered.filter((t) => t.status === s).map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
             </div>
           </div>
         ))}
@@ -514,15 +650,30 @@ function BoardView({ tickets, roster, onOpen }) {
   );
 }
 
-function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate }) {
+function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete }) {
   const [note, setNote] = useState("");
   const [revType, setRevType] = useState("minor");
   const [sat, setSat] = useState(ticket.satisfactionScore || 0);
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
+  const [editing, setEditing] = useState(false);
+  const [imageUrl, setImageUrl] = useState(null);
+
+  const [eTitle, setETitle] = useState(ticket.title);
+  const [eDesc, setEDesc] = useState(ticket.description);
+  const [eDept, setEDept] = useState(ticket.dept);
+  const [eContentType, setEContentType] = useState(ticket.contentType || "Static");
+  const [ePurpose, setEPurpose] = useState(ticket.purpose || "Other");
+  const [ePriority, setEPriority] = useState(ticket.priority);
+  const [eDue, setEDue] = useState(ticket.dueDate || "");
+
+  useEffect(() => {
+    if (ticket.hasImage) loadInspoImage(ticket.id).then(setImageUrl);
+  }, [ticket.id, ticket.hasImage]);
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const isAssignee = ticket.assignedTo === currentUser?.id;
   const isRequester = ticket.requestedBy === currentUser?.id;
+  const canEdit = isLead || isRequester;
   const revEq = revisionEquivalent(ticket);
   const acc = ticketAccuracy(ticket);
 
@@ -551,6 +702,25 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
   const complete = () => {
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO() }), { __label: "Approved & completed" }));
   };
+  const saveEdits = () => {
+    const changes = [];
+    if (eTitle !== ticket.title) changes.push(`title "${ticket.title}" → "${eTitle}"`);
+    if (eDesc !== ticket.description) changes.push(`description updated`);
+    if (eDept !== ticket.dept) changes.push(`department ${ticket.dept} → ${eDept}`);
+    if (eContentType !== ticket.contentType) changes.push(`content type ${ticket.contentType || "—"} → ${eContentType}`);
+    if (ePurpose !== ticket.purpose) changes.push(`purpose ${ticket.purpose || "—"} → ${ePurpose}`);
+    if (ePriority !== ticket.priority) changes.push(`priority ${ticket.priority} → ${ePriority}`);
+    if (eDue !== (ticket.dueDate || "")) changes.push(`due date ${ticket.dueDate || "—"} → ${eDue || "—"}`);
+    if (changes.length === 0) { setEditing(false); return; }
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, title: eTitle, description: eDesc, dept: eDept, contentType: eContentType, purpose: ePurpose, priority: ePriority, dueDate: eDue || null }),
+      { __label: `Edited: ${changes.join("; ")}` }
+    ));
+    setEditing(false);
+  };
+  const handleDelete = () => {
+    if (window.confirm(`Delete JOB-${String(ticket.ticketNo).padStart(4, "0")}? This cannot be undone.`)) onDelete(ticket.id);
+  };
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-start md:items-center justify-center z-50 p-3 overflow-y-auto" onClick={onClose}>
@@ -558,19 +728,75 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
         <div className="docket-perf" />
         <div className="p-5">
           <div className="flex items-start justify-between mb-2">
-            <div>
+            <div className="flex-1">
               <div className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
                 JOB-{String(ticket.ticketNo).padStart(4, "0")} · {ticket.dept}
               </div>
-              <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>{ticket.title}</h2>
+              {!editing ? (
+                <h2 className="text-xl font-black" style={{ fontFamily: "var(--font-display)" }}>{ticket.title}</h2>
+              ) : (
+                <input value={eTitle} onChange={(e) => setETitle(e.target.value)} className="text-xl font-black border rounded px-2 py-1 w-full mt-1" style={{ fontFamily: "var(--font-display)", borderColor: "var(--line)" }} />
+              )}
             </div>
-            <button onClick={onClose}><X size={18} /></button>
+            <div className="flex items-center gap-2 ml-2">
+              {canEdit && !editing && <button onClick={() => setEditing(true)} title="Edit details"><Pencil size={16} color="var(--muted)" /></button>}
+              {isLead && <button onClick={handleDelete} title="Delete request"><Trash2 size={16} color="var(--coral)" /></button>}
+              <button onClick={onClose}><X size={18} /></button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 mb-3">
-            <StampBadge priority={ticket.priority} />
+
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <StampBadge priority={editing ? ePriority : ticket.priority} />
             <StatusPill status={ticket.status} />
+            {!editing && ticket.contentType && <span className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{ticket.contentType}</span>}
+            {!editing && ticket.purpose && <span className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{ticket.purpose}</span>}
           </div>
-          {ticket.description && <p className="text-sm mb-4" style={{ color: "var(--ink)" }}>{ticket.description}</p>}
+
+          {!editing ? (
+            ticket.description && <p className="text-sm mb-4">{ticket.description}</p>
+          ) : (
+            <div className="space-y-3 mb-4 p-3 rounded border" style={{ borderColor: "var(--line)" }}>
+              <Field label="Description">
+                <textarea value={eDesc} onChange={(e) => setEDesc(e.target.value)} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+              </Field>
+              <div className="grid grid-cols-2 gap-2">
+                <Field label="Department">
+                  <select value={eDept} onChange={(e) => setEDept(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                    {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </Field>
+                <Field label="Priority">
+                  <select value={ePriority} onChange={(e) => setEPriority(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                    {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </Field>
+                <Field label="Content type">
+                  <select value={eContentType} onChange={(e) => setEContentType(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                    {CONTENT_TYPES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </Field>
+                <Field label="Purpose">
+                  <select value={ePurpose} onChange={(e) => setEPurpose(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                    {PURPOSES.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </Field>
+                <Field label="Due date">
+                  <input type="date" value={eDue} onChange={(e) => setEDue(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+                </Field>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={saveEdits} className="flex items-center gap-1 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}><Save size={13} /> Save changes</button>
+                <button onClick={() => setEditing(false)} className="px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+
+          {imageUrl && (
+            <div className="mb-4">
+              <SectionTitle>Inspiration image</SectionTitle>
+              <img src={imageUrl} alt="inspiration" className="mt-2 max-h-56 rounded border" style={{ borderColor: "var(--line)" }} />
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2 text-xs mb-4" style={{ color: "var(--muted)" }}>
             <div>Requested by: <b style={{ color: "var(--ink)" }}>{nameOf(roster, ticket.requestedBy)}</b></div>
@@ -603,9 +829,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
                   <option value="major">Major</option>
                 </select>
                 <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed?" className="flex-1 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
-                <button onClick={addRevision} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}>
-                  <MessageSquarePlus size={13} /> Add
-                </button>
+                <button onClick={addRevision} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><MessageSquarePlus size={13} /> Add</button>
               </div>
               {!isLead && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Note: only the Team Lead's tagging counts toward official minor/major stats.</div>}
             </div>
@@ -622,12 +846,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Your satisfaction rating (1–5)</SectionTitle>
               <StarRow value={sat} onChange={setSatisfaction} />
-              <button
-                onClick={complete}
-                disabled={!sat}
-                className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40"
-                style={{ background: "var(--teal)" }}
-              >
+              <button onClick={complete} disabled={!sat} className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40" style={{ background: "var(--teal)" }}>
                 <CheckCircle2 size={14} /> Approve & complete
               </button>
             </div>
@@ -641,7 +860,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
           )}
 
           {ticket.revisions.length > 0 && (
-            <div className="border-t pt-3" style={{ borderColor: "var(--line)" }}>
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Revision history</SectionTitle>
               <div className="mt-2 space-y-1.5 max-h-32 overflow-y-auto">
                 {ticket.revisions.map((r) => (
@@ -652,6 +871,17 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate })
               </div>
             </div>
           )}
+
+          <div className="border-t pt-3" style={{ borderColor: "var(--line)" }}>
+            <SectionTitle>Edit / change log</SectionTitle>
+            <div className="mt-2 space-y-1.5 max-h-40 overflow-y-auto">
+              {[...ticket.history].reverse().map((h, i) => (
+                <div key={i} className="text-xs">
+                  <span style={{ color: "var(--muted)" }}>{new Date(h.date).toLocaleString()} · {h.by}</span> — {h.action}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -662,9 +892,7 @@ function StarRow({ value, onChange }) {
   return (
     <div className="flex gap-1 mt-1">
       {[1, 2, 3, 4, 5].map((n) => (
-        <button key={n} onClick={() => onChange(n)}>
-          <Star size={20} fill={n <= value ? "var(--amber)" : "none"} color="var(--amber)" />
-        </button>
+        <button key={n} onClick={() => onChange(n)}><Star size={20} fill={n <= value ? "var(--amber)" : "none"} color="var(--amber)" /></button>
       ))}
     </div>
   );
@@ -711,9 +939,15 @@ function ReportsView({ tickets, roster }) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <SectionTitle>Report month</SectionTitle>
         <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+        <button onClick={() => downloadCSV(ticketsToCSV(completedInMonth, roster), `job-docket-report-${month}.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
+          <Download size={13} /> Export {month} CSV
+        </button>
+        <button onClick={() => downloadCSV(ticketsToCSV(tickets, roster), `job-docket-all-data.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
+          <Download size={13} /> Export all data CSV
+        </button>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -728,10 +962,7 @@ function ReportsView({ tickets, roster }) {
         <table className="w-full text-sm mt-3">
           <thead>
             <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th>
-              <th className="pb-2">Completed</th>
-              <th className="pb-2">Avg revisions (major-eq.)</th>
-              <th className="pb-2">Avg accuracy</th>
+              <th className="pb-2">Name</th><th className="pb-2">Completed</th><th className="pb-2">Avg revisions (major-eq.)</th><th className="pb-2">Avg accuracy</th>
             </tr>
           </thead>
           <tbody>
@@ -760,7 +991,6 @@ function ReportsView({ tickets, roster }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
-
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
           <SectionTitle>Accuracy & revision trend — last 6 months</SectionTitle>
           <ResponsiveContainer width="100%" height={220}>
@@ -810,9 +1040,7 @@ function TeamView({ roster, saveRoster }) {
   return (
     <div className="space-y-5">
       <form onSubmit={add} className="bg-white border rounded-md p-4 flex flex-wrap gap-2 items-end" style={{ borderColor: "var(--line)" }}>
-        <Field label="Name">
-          <input value={name} onChange={(e) => setName(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
-        </Field>
+        <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} /></Field>
         <Field label="Role">
           <select value={role} onChange={(e) => setRole(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
             {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
@@ -823,25 +1051,19 @@ function TeamView({ roster, saveRoster }) {
             {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         </Field>
-        <button className="px-3 py-1.5 rounded text-white text-sm font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}>
-          <Plus size={14} /> Add member
-        </button>
+        <button className="px-3 py-1.5 rounded text-white text-sm font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><Plus size={14} /> Add member</button>
       </form>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
         <SectionTitle>Team roster</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Role</th><th className="pb-2">Dept</th><th className="pb-2"></th>
-            </tr>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Name</th><th className="pb-2">Role</th><th className="pb-2">Dept</th><th className="pb-2"></th></tr>
           </thead>
           <tbody>
             {roster.map((m) => (
               <tr key={m.id} className="border-t" style={{ borderColor: "var(--line)" }}>
-                <td className="py-1.5">
-                  <input value={m.name} onChange={(e) => update(m.id, { name: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} />
-                </td>
+                <td className="py-1.5"><input value={m.name} onChange={(e) => update(m.id, { name: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} /></td>
                 <td className="py-1.5">
                   <select value={m.role} onChange={(e) => update(m.id, { role: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
                     {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
@@ -852,9 +1074,7 @@ function TeamView({ roster, saveRoster }) {
                     {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </td>
-                <td className="py-1.5 text-right">
-                  <button onClick={() => remove(m.id)}><Trash2 size={15} color="var(--coral)" /></button>
-                </td>
+                <td className="py-1.5 text-right"><button onClick={() => remove(m.id)}><Trash2 size={15} color="var(--coral)" /></button></td>
               </tr>
             ))}
           </tbody>
