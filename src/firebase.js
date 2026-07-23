@@ -60,18 +60,22 @@ export const storage = {
 // Tickets are stored one-document-per-ticket (not a single shared blob) so
 // concurrent sessions can never silently overwrite each other's changes —
 // deleting or editing one ticket only ever touches that ticket's own document.
-export const ticketsApi = {
-  subscribe(callback) {
-    const colRef = collection(db, "tickets_v2");
-    return onSnapshot(colRef, (snap) => {
-      const list = snap.docs.map((d) => d.data());
-      callback(list);
-    });
-  },
-  async upsert(ticket) {
-    await setDoc(doc(db, "tickets_v2", ticket.id), ticket);
-  },
-  async remove(id) {
-    await deleteDoc(doc(db, "tickets_v2", id));
-  },
-};
+// Reused for chat messages too, for the same reason (many people posting
+// concurrently should never be able to clobber each other's messages).
+function makeCollectionApi(collectionName) {
+  return {
+    subscribe(callback) {
+      const colRef = collection(db, collectionName);
+      return onSnapshot(colRef, (snap) => callback(snap.docs.map((d) => d.data())));
+    },
+    async upsert(item) {
+      await setDoc(doc(db, collectionName, item.id), item);
+    },
+    async remove(id) {
+      await deleteDoc(doc(db, collectionName, id));
+    },
+  };
+}
+
+export const ticketsApi = makeCollectionApi("tickets_v2");
+export const chatApi = makeCollectionApi("chat_messages");
