@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
-  MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save
+  MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -72,7 +73,7 @@ function csvEscape(v) {
 function ticketsToCSV(list, roster) {
   const headers = [
     "Ticket No", "Title", "Department", "Content Type", "Purpose(s)", "Requested By", "Assigned To",
-    "Priority", "Status", "Date Requested", "Due Date", "Date Completed", "Units",
+    "Priority", "Status", "Date Requested", "Due Date", "Date Completed", "Units", "Reference Link",
     "Minor Revisions", "Major Revisions", "Revision Equivalent", "Satisfaction", "Brief Compliance", "Accuracy",
   ];
   const rows = list.map((t) => {
@@ -81,7 +82,7 @@ function ticketsToCSV(list, roster) {
     return [
       t.ticketNo, t.title, t.dept, t.contentType || "", getPurposes(t).join("; "),
       nameOf(roster, t.requestedBy), nameOf(roster, t.assignedTo),
-      t.priority, t.status, t.dateRequested, t.dueDate || "", t.dateCompleted || "", t.units || "",
+      t.priority, t.status, t.dateRequested, t.dueDate || "", t.dateCompleted || "", t.units || "", t.referenceLink || "",
       minor, major, revisionEquivalent(t).toFixed(2),
       t.satisfactionScore || "", t.briefCompliance || "", ticketAccuracy(t) ?? "",
     ].map(csvEscape).join(",");
@@ -202,14 +203,19 @@ export default function CreativeOpsApp() {
   const [view, setView] = useState("dashboard");
   const [ready, setReady] = useState(false);
   const [openTicketId, setOpenTicketId] = useState(null);
-  const [bgColor, setBgColor] = useState("");
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
+
+  const [announcements, setAnnouncements] = useState([]);
+  const [reminders, setReminders] = useState([]);
+  const [endorsements, setEndorsements] = useState([]);
 
   useEffect(() => {
     let unsubRoster = null;
     let unsubTickets = null;
-    let unsubAppearance = null;
     let unsubWallpaper = null;
+    let unsubAnnouncements = null;
+    let unsubReminders = null;
+    let unsubEndorsements = null;
     let lastKnownUserId = "";
 
     (async () => {
@@ -237,30 +243,25 @@ export default function CreativeOpsApp() {
         setReady(true);
       });
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
-      unsubAppearance = storage.subscribe("appearance", true, (val) => {
-        try {
-          const parsed = val ? JSON.parse(val) : {};
-          setBgColor(parsed.bgColor || "");
-        } catch (e) {}
-      });
       unsubWallpaper = storage.subscribe("wallpaper_image", true, (val) => setWallpaperUrl(val || null));
+      unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
+      unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
+      unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
     })();
 
     return () => {
       if (unsubRoster) unsubRoster();
       if (unsubTickets) unsubTickets();
-      if (unsubAppearance) unsubAppearance();
       if (unsubWallpaper) unsubWallpaper();
+      if (unsubAnnouncements) unsubAnnouncements();
+      if (unsubReminders) unsubReminders();
+      if (unsubEndorsements) unsubEndorsements();
     };
   }, []);
 
   const saveRoster = async (next) => {
     setRoster(next);
     try { await storage.set("roster", JSON.stringify(next), true); } catch (e) {}
-  };
-  const saveBgColor = async (color) => {
-    setBgColor(color);
-    try { await storage.set("appearance", JSON.stringify({ bgColor: color }), true); } catch (e) {}
   };
   const saveWallpaper = async (dataUrl) => {
     setWallpaperUrl(dataUrl);
@@ -281,6 +282,84 @@ export default function CreativeOpsApp() {
 
   const currentUser = roster.find((m) => m.id === currentUserId);
   const isLead = currentUser?.role === "Team Lead" || currentUser?.role === "Admin";
+
+  const postAnnouncement = async (text) => {
+    if (!text.trim()) return;
+    const next = [{ id: uid(), text, by: currentUser?.name || "Unknown", date: new Date().toISOString() }, ...announcements];
+    setAnnouncements(next);
+    try { await storage.set("announcements", JSON.stringify(next), true); } catch (e) {}
+  };
+  const deleteAnnouncement = async (id) => {
+    const next = announcements.filter((a) => a.id !== id);
+    setAnnouncements(next);
+    try { await storage.set("announcements", JSON.stringify(next), true); } catch (e) {}
+  };
+
+  const addReminder = async (text, dueDate) => {
+    if (!text.trim()) return;
+    const next = [...reminders, { id: uid(), text, dueDate: dueDate || null, by: currentUser?.name || "Unknown", date: new Date().toISOString() }];
+    setReminders(next);
+    try { await storage.set("reminders", JSON.stringify(next), true); } catch (e) {}
+  };
+  const deleteReminder = async (id) => {
+    const next = reminders.filter((r) => r.id !== id);
+    setReminders(next);
+    try { await storage.set("reminders", JSON.stringify(next), true); } catch (e) {}
+  };
+
+  const addEndorsement = async (toMemberId, message) => {
+    if (!message.trim()) return;
+    const next = [{ id: uid(), toMemberId, fromName: currentUser?.name || "Unknown", message, date: new Date().toISOString() }, ...endorsements];
+    setEndorsements(next);
+    try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
+  };
+  const deleteEndorsement = async (id) => {
+    const next = endorsements.filter((e2) => e2.id !== id);
+    setEndorsements(next);
+    try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
+  };
+
+  const exportBackup = () => {
+    const backup = {
+      exportedAt: new Date().toISOString(),
+      roster, tickets, ticketSeq, announcements, reminders, endorsements,
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `job-docket-backup-${todayISO()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const restoreBackup = async (file) => {
+    if (!file) return;
+    const text = await file.text();
+    let data;
+    try { data = JSON.parse(text); } catch (e) { window.alert("That file isn't valid backup JSON."); return; }
+    if (!window.confirm("Restore this backup? Roster, announcements, and reminders will be replaced. Tickets in the backup will be added or overwritten — tickets created since the backup was made will not be deleted.")) return;
+    if (Array.isArray(data.roster)) await saveRoster(data.roster);
+    if (typeof data.ticketSeq === "number") await saveSeq(data.ticketSeq);
+    if (Array.isArray(data.tickets)) {
+      for (const t of data.tickets) await ticketsApi.upsert(t);
+    }
+    if (Array.isArray(data.announcements)) {
+      setAnnouncements(data.announcements);
+      try { await storage.set("announcements", JSON.stringify(data.announcements), true); } catch (e) {}
+    }
+    if (Array.isArray(data.reminders)) {
+      setReminders(data.reminders);
+      try { await storage.set("reminders", JSON.stringify(data.reminders), true); } catch (e) {}
+    }
+    if (Array.isArray(data.endorsements)) {
+      setEndorsements(data.endorsements);
+      try { await storage.set("endorsements", JSON.stringify(data.endorsements), true); } catch (e) {}
+    }
+    window.alert("Restore complete.");
+  };
 
   const logHistory = (ticket, action) => ({
     ...ticket,
@@ -316,6 +395,7 @@ export default function CreativeOpsApp() {
       revisions: [],
       revisionRequests: [],
       units: null,
+      referenceLink: "",
       satisfactionScore: null,
       briefCompliance: null,
       hasImage: !!data.imageDataUrl,
@@ -349,28 +429,63 @@ export default function CreativeOpsApp() {
     color: "var(--ink)",
     ...(wallpaperUrl
       ? { backgroundImage: `url(${wallpaperUrl})`, backgroundSize: "cover", backgroundPosition: "center", backgroundAttachment: "fixed" }
-      : { background: bgColor || "var(--paper)" }),
+      : { background: "var(--paper)" }),
   };
 
   return (
     <div style={outerStyle} className="min-h-[600px] w-full">
       <FontStyles />
-      <Header roster={roster} currentUserId={currentUserId} pickUser={pickUser} />
+      <Header
+        roster={roster}
+        currentUserId={currentUserId}
+        pickUser={pickUser}
+        tickets={tickets}
+        announcements={announcements}
+        currentUser={currentUser}
+        onOpen={setOpenTicketId}
+        setView={setView}
+      />
       <TabBar view={view} setView={setView} />
       <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto">
-        {view === "dashboard" && <DashboardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} setView={setView} />}
+        {view === "dashboard" && (
+          <DashboardView
+            tickets={tickets}
+            roster={roster}
+            onOpen={setOpenTicketId}
+            setView={setView}
+            announcements={announcements}
+            isLead={isLead}
+            postAnnouncement={postAnnouncement}
+            deleteAnnouncement={deleteAnnouncement}
+            reminders={reminders}
+            addReminder={addReminder}
+            deleteReminder={deleteReminder}
+          />
+        )}
         {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} />}
         {view === "board" && <BoardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
+        {view === "directory" && <DirectoryView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
+        {view === "teamspace" && (
+          <TeamSpaceView
+            roster={roster}
+            currentUser={currentUser}
+            endorsements={endorsements}
+            addEndorsement={addEndorsement}
+            deleteEndorsement={deleteEndorsement}
+            saveRoster={saveRoster}
+          />
+        )}
         {view === "team" && (
           <TeamView
             roster={roster}
             saveRoster={saveRoster}
-            bgColor={bgColor}
-            saveBgColor={saveBgColor}
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
+            exportBackup={exportBackup}
+            restoreBackup={restoreBackup}
+            isLead={isLead}
           />
         )}
       </main>
@@ -403,8 +518,7 @@ function FontStyles() {
   );
 }
 
-function Header({ roster, currentUserId, pickUser }) {
-  const currentUser = roster.find((m) => m.id === currentUserId);
+function Header({ roster, currentUserId, pickUser, tickets, announcements, currentUser, onOpen, setView }) {
   return (
     <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
@@ -414,14 +528,88 @@ function Header({ roster, currentUserId, pickUser }) {
           </div>
           <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
         </div>
-        <label className="text-sm flex items-center gap-2" style={{ color: "var(--muted)" }}>
-          <Avatar member={currentUser} size={26} />
-          Acting as
-          <select value={currentUserId} onChange={(e) => pickUser(e.target.value)} className="border rounded px-2 py-1 text-sm bg-white" style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
-            {roster.map((m) => <option key={m.id} value={m.id}>{m.name} — {m.role}</option>)}
-          </select>
-        </label>
+        <div className="flex items-center gap-3">
+          <NotificationBell tickets={tickets} announcements={announcements} currentUser={currentUser} onOpen={onOpen} setView={setView} />
+          <label className="text-sm flex items-center gap-2" style={{ color: "var(--muted)" }}>
+            <Avatar member={currentUser} size={26} />
+            Acting as
+            <select value={currentUserId} onChange={(e) => pickUser(e.target.value)} className="border rounded px-2 py-1 text-sm bg-white" style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
+              {roster.map((m) => <option key={m.id} value={m.id}>{m.name} — {m.role}</option>)}
+            </select>
+          </label>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function NotificationBell({ tickets, announcements, currentUser, onOpen, setView }) {
+  const [open, setOpen] = useState(false);
+  const [lastSeen, setLastSeen] = useState(null);
+  const [loadedSeen, setLoadedSeen] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    (async () => {
+      try {
+        const res = await storage.get(`notif_last_seen_${currentUser.id}`, false);
+        setLastSeen(res?.value ? new Date(res.value) : new Date(0));
+      } catch (e) { setLastSeen(new Date(0)); }
+      setLoadedSeen(true);
+    })();
+  }, [currentUser?.id]);
+
+  const items = useMemo(() => {
+    if (!currentUser) return [];
+    const fromTickets = tickets
+      .filter((t) => t.assignedTo === currentUser.id || t.requestedBy === currentUser.id)
+      .flatMap((t) => t.history.map((h) => ({ date: h.date, text: `${h.action} — JOB-${String(t.ticketNo).padStart(4, "0")}`, ticketId: t.id })));
+    const fromAnnouncements = announcements.map((a) => ({ date: a.date, text: `Announcement: ${a.text}`, ticketId: null }));
+    return [...fromTickets, ...fromAnnouncements].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+  }, [tickets, announcements, currentUser]);
+
+  const unreadCount = loadedSeen ? items.filter((i) => new Date(i.date) > lastSeen).length : 0;
+
+  const markAllRead = async () => {
+    const now = new Date().toISOString();
+    setLastSeen(new Date(now));
+    try { await storage.set(`notif_last_seen_${currentUser.id}`, now, false); } catch (e) {}
+  };
+
+  const handleItemClick = (item) => {
+    setOpen(false);
+    if (item.ticketId) onOpen(item.ticketId);
+    else setView("dashboard");
+  };
+
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen((o) => !o)} className="relative p-2 rounded-full border" style={{ borderColor: "var(--line)", background: "white" }}>
+        {unreadCount > 0 ? <BellRing size={16} color="var(--coral)" /> : <Bell size={16} color="var(--muted)" />}
+        {unreadCount > 0 && (
+          <span className="absolute -top-1 -right-1 text-[9px] font-bold text-white rounded-full w-4 h-4 flex items-center justify-center" style={{ background: "var(--coral)" }}>
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-72 bg-white border rounded-md shadow-lg z-50 max-h-96 overflow-y-auto" style={{ borderColor: "var(--line)" }}>
+          <div className="p-2 flex items-center justify-between border-b" style={{ borderColor: "var(--line)" }}>
+            <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--muted)" }}>Notifications</span>
+            <button onClick={markAllRead} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>Mark all read</button>
+          </div>
+          {items.length === 0 ? (
+            <div className="p-4 text-xs text-center" style={{ color: "var(--muted)" }}>Nothing yet.</div>
+          ) : (
+            items.map((item, i) => (
+              <button key={i} onClick={() => handleItemClick(item)} className="w-full text-left px-3 py-2 text-xs border-b hover:bg-[var(--paper)]" style={{ borderColor: "var(--line)" }}>
+                <div>{item.text}</div>
+                <div style={{ color: "var(--muted)" }}>{new Date(item.date).toLocaleString()}</div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -431,7 +619,9 @@ function TabBar({ view, setView }) {
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "new", label: "New Request", icon: FilePlus2 },
     { id: "board", label: "Board", icon: KanbanSquare },
+    { id: "directory", label: "Directory", icon: FolderOpen },
     { id: "reports", label: "Reports", icon: BarChart3 },
+    { id: "teamspace", label: "Team Space", icon: Heart },
     { id: "team", label: "Team", icon: Users },
   ];
   return (
@@ -477,7 +667,108 @@ function TicketCard({ ticket, roster, onOpen }) {
   );
 }
 
-function DashboardView({ tickets, roster, onOpen, setView }) {
+function AnnouncementsPanel({ announcements, isLead, postAnnouncement, deleteAnnouncement }) {
+  const [text, setText] = useState("");
+  const [showForm, setShowForm] = useState(false);
+
+  const submit = () => {
+    if (!text.trim()) return;
+    postAnnouncement(text);
+    setText("");
+    setShowForm(false);
+  };
+
+  if (announcements.length === 0 && !isLead) return null;
+
+  return (
+    <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <Megaphone size={14} color="var(--amber)" />
+          <SectionTitle>Announcements</SectionTitle>
+        </div>
+        {isLead && <button onClick={() => setShowForm((s) => !s)} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>{showForm ? "Cancel" : "+ Post"}</button>}
+      </div>
+      {showForm && (
+        <div className="flex gap-2 mt-2">
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Team announcement…" className="flex-1 border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+          <button onClick={submit} className="px-3 py-1 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Post</button>
+        </div>
+      )}
+      <div className="mt-2 space-y-2">
+        {announcements.length === 0 && <div className="text-xs" style={{ color: "var(--muted)" }}>No announcements yet.</div>}
+        {announcements.map((a) => (
+          <div key={a.id} className="text-sm flex items-start justify-between gap-2">
+            <div>
+              {a.text}
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{a.by} · {new Date(a.date).toLocaleDateString()}</div>
+            </div>
+            {isLead && <button onClick={() => deleteAnnouncement(a.id)}><X size={13} color="var(--muted)" /></button>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RemindersPanel({ reminders, addReminder, deleteReminder }) {
+  const [text, setText] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [showForm, setShowForm] = useState(false);
+
+  const submit = () => {
+    if (!text.trim()) return;
+    addReminder(text, dueDate);
+    setText(""); setDueDate("");
+    setShowForm(false);
+  };
+
+  const sorted = [...reminders].sort((a, b) => (a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : 1);
+
+  if (reminders.length === 0 && !showForm) {
+    return (
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <div className="flex items-center justify-between">
+          <SectionTitle>Reminders</SectionTitle>
+          <button onClick={() => setShowForm(true)} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>+ Add</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+      <div className="flex items-center justify-between">
+        <SectionTitle>Reminders</SectionTitle>
+        <button onClick={() => setShowForm((s) => !s)} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>{showForm ? "Cancel" : "+ Add"}</button>
+      </div>
+      {showForm && (
+        <div className="flex flex-wrap gap-2 mt-2">
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Reminder…" className="flex-1 border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+          <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+          <button onClick={submit} className="px-3 py-1 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Add</button>
+        </div>
+      )}
+      <div className="mt-2 space-y-1.5">
+        {sorted.map((r) => {
+          const overdue = r.dueDate && r.dueDate < todayISO();
+          return (
+            <div key={r.id} className="text-sm flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Clock size={12} color={overdue ? "var(--coral)" : "var(--muted)"} />
+                <span>{r.text}</span>
+                {r.dueDate && <span className="text-[11px]" style={{ color: overdue ? "var(--coral)" : "var(--muted)" }}>({r.dueDate})</span>}
+              </div>
+              <button onClick={() => deleteReminder(r.id)}><X size={13} color="var(--muted)" /></button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead, postAnnouncement, deleteAnnouncement, reminders, addReminder, deleteReminder }) {
   const open = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
   const overdue = open.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO());
   const onHold = tickets.filter((t) => t.status === "On Hold");
@@ -523,6 +814,8 @@ function DashboardView({ tickets, roster, onOpen, setView }) {
 
   return (
     <div className="space-y-6">
+      <AnnouncementsPanel announcements={announcements} isLead={isLead} postAnnouncement={postAnnouncement} deleteAnnouncement={deleteAnnouncement} />
+      <RemindersPanel reminders={reminders} addReminder={addReminder} deleteReminder={deleteReminder} />
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Open tickets" value={open.length} icon={KanbanSquare} />
         <StatCard label="Overdue" value={overdue.length} icon={AlertTriangle} alert={overdue.length > 0} />
@@ -837,6 +1130,53 @@ function BoardView({ tickets, roster, onOpen }) {
   );
 }
 
+function DirectoryView({ tickets, roster, onOpen }) {
+  const [search, setSearch] = useState("");
+  const completed = tickets.filter((t) => t.status === "Completed");
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? completed.filter((t) =>
+        t.title.toLowerCase().includes(q) ||
+        t.dept.toLowerCase().includes(q) ||
+        getPurposes(t).some((p) => p.toLowerCase().includes(q)) ||
+        nameOf(roster, t.assignedTo).toLowerCase().includes(q)
+      )
+    : completed;
+  const sorted = [...filtered].sort((a, b) => new Date(b.dateCompleted || 0) - new Date(a.dateCompleted || 0));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <SectionTitle>Completed work directory</SectionTitle>
+      </div>
+      <div className="relative max-w-sm">
+        <Search size={14} className="absolute left-2.5 top-2.5" color="var(--muted)" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search title, department, purpose, artist…" className="w-full border rounded pl-8 pr-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
+      </div>
+      {sorted.length === 0 ? (
+        <EmptyState text={completed.length === 0 ? "No completed projects yet." : "No matches."} />
+      ) : (
+        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
+          {sorted.map((t) => (
+            <div key={t.id} className="bg-white border rounded-md p-3" style={{ borderColor: "var(--line)" }}>
+              <button onClick={() => onOpen(t.id)} className="text-left w-full">
+                <div className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")} · {t.dateCompleted}</div>
+                <div className="font-semibold text-sm mt-0.5">{t.title}</div>
+                <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>{t.dept} · {getPurposes(t).join(", ")} · {nameOf(roster, t.assignedTo)}</div>
+              </button>
+              {t.referenceLink && (
+                <a href={t.referenceLink} target="_blank" rel="noopener noreferrer" className="text-xs flex items-center gap-1 mt-2 underline" style={{ color: "var(--teal)" }}>
+                  <LinkIcon size={12} /> View reference
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete }) {
   const [note, setNote] = useState("");
   const [revType, setRevType] = useState("minor");
@@ -846,6 +1186,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const [imageUrl, setImageUrl] = useState(null);
   const [revisionPoint, setRevisionPoint] = useState("");
   const [unitsInput, setUnitsInput] = useState(ticket.units || "");
+  const [refLinkInput, setRefLinkInput] = useState(ticket.referenceLink || "");
 
   const [eTitle, setETitle] = useState(ticket.title);
   const [eDesc, setEDesc] = useState(ticket.description);
@@ -894,6 +1235,10 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
     const n = Number(unitsInput);
     if (!unitsInput || isNaN(n) || n <= 0) return;
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, units: n }), { __label: `Units set to ${n}` }));
+  };
+  const saveRefLink = () => {
+    if (!refLinkInput.trim()) return;
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, referenceLink: refLinkInput.trim() }), { __label: "Reference link added" }));
   };
   const setCompliance = (v) => {
     setComp(v);
@@ -1115,10 +1460,20 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                 <button onClick={saveUnits} className="px-2 py-1 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Save units</button>
                 {ticket.units && <span className="text-xs" style={{ color: "var(--muted)" }}>Currently: {ticket.units}</span>}
               </div>
+
+              <div className="mt-3">
+                <SectionTitle>Reference link (Team Lead) — for the completed-work directory</SectionTitle>
+                <div className="flex gap-2 mt-2 items-center">
+                  <input type="url" value={refLinkInput} onChange={(e) => setRefLinkInput(e.target.value)} placeholder="https://…" className="flex-1 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                  <button onClick={saveRefLink} className="px-2 py-1 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Save link</button>
+                </div>
+                {ticket.referenceLink && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Currently: {ticket.referenceLink}</div>}
+              </div>
+
               <button
                 onClick={complete}
-                disabled={!ticket.units}
-                title={!ticket.units ? "Set units produced before marking complete" : ""}
+                disabled={!ticket.units || !ticket.referenceLink}
+                title={!ticket.units || !ticket.referenceLink ? "Set units and reference link before marking complete" : ""}
                 className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-40"
                 style={{ background: "var(--teal)" }}
               >
@@ -1132,10 +1487,17 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
               <SectionTitle>Accuracy score</SectionTitle>
               <div className="text-2xl font-black mt-1" style={{ fontFamily: "var(--font-display)", color: "var(--teal)" }}>{acc ?? "—"}<span className="text-sm">/100</span></div>
               {ticket.units && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Units produced: {ticket.units}</div>}
+              {ticket.referenceLink && (
+                <div className="text-xs mt-1">
+                  Reference: <a href={ticket.referenceLink} target="_blank" rel="noopener noreferrer" className="underline" style={{ color: "var(--teal)" }}>{ticket.referenceLink}</a>
+                </div>
+              )}
               {isLead && (
-                <div className="flex gap-2 items-center mt-2">
+                <div className="flex flex-wrap gap-2 items-center mt-2">
                   <input type="number" min="1" value={unitsInput} onChange={(e) => setUnitsInput(e.target.value)} className="w-20 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
                   <button onClick={saveUnits} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Correct units</button>
+                  <input type="url" value={refLinkInput} onChange={(e) => setRefLinkInput(e.target.value)} placeholder="https://…" className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                  <button onClick={saveRefLink} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Correct link</button>
                 </div>
               )}
               {isLead && (
@@ -1411,7 +1773,111 @@ function ReportsView({ tickets, roster }) {
   );
 }
 
-function TeamView({ roster, saveRoster, bgColor, saveBgColor, wallpaperUrl, saveWallpaper, clearWallpaper }) {
+function TeamSpaceView({ roster, currentUser, endorsements, addEndorsement, deleteEndorsement, saveRoster }) {
+  const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
+  const [message, setMessage] = useState("");
+  const [editingBio, setEditingBio] = useState(false);
+  const [bioInput, setBioInput] = useState("");
+  const [likesInput, setLikesInput] = useState("");
+
+  const selected = roster.find((m) => m.id === selectedId) || roster[0];
+  const isSelf = selected && currentUser && selected.id === currentUser.id;
+  const mine = endorsements.filter((e) => e.toMemberId === selected?.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  useEffect(() => {
+    if (selected) { setBioInput(selected.bio || ""); setLikesInput(selected.likes || ""); }
+    setEditingBio(false);
+  }, [selected?.id]);
+
+  const saveBio = () => {
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, bio: bioInput, likes: likesInput } : m)));
+    setEditingBio(false);
+  };
+
+  const submitMessage = () => {
+    if (!message.trim() || !selected) return;
+    addEndorsement(selected.id, message);
+    setMessage("");
+  };
+
+  if (!selected) return <EmptyState text="Add team members first, in the Team tab." />;
+
+  return (
+    <div className="grid md:grid-cols-4 gap-4">
+      <div className="md:col-span-1 flex md:flex-col gap-1 overflow-x-auto">
+        {roster.map((m) => (
+          <button
+            key={m.id}
+            onClick={() => setSelectedId(m.id)}
+            className="flex items-center gap-2 px-2.5 py-2 rounded text-sm font-medium text-left whitespace-nowrap"
+            style={{ background: selectedId === m.id ? "var(--ink)" : "white", color: selectedId === m.id ? "white" : "var(--ink)", border: "1px solid var(--line)" }}
+          >
+            <Avatar member={m} size={22} /> {m.name}
+          </button>
+        ))}
+      </div>
+
+      <div className="md:col-span-3 space-y-4">
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <div className="flex items-center gap-3">
+            <Avatar member={selected} size={48} />
+            <div>
+              <div className="font-black text-lg" style={{ fontFamily: "var(--font-display)" }}>{selected.name}</div>
+              <div className="text-xs" style={{ color: "var(--muted)" }}>{selected.role} · {selected.dept}</div>
+            </div>
+            {isSelf && !editingBio && <button onClick={() => setEditingBio(true)} className="ml-auto"><Pencil size={14} color="var(--muted)" /></button>}
+          </div>
+
+          {!editingBio ? (
+            <div className="mt-3 text-sm space-y-2">
+              <div>{selected.bio || <span style={{ color: "var(--muted)" }}>No bio yet.</span>}</div>
+              {selected.likes && (
+                <div className="text-xs" style={{ color: "var(--muted)" }}><b>Likes:</b> {selected.likes}</div>
+              )}
+            </div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              <Field label="Bio">
+                <textarea value={bioInput} onChange={(e) => setBioInput(e.target.value)} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="A little about you…" />
+              </Field>
+              <Field label="Likes / interests">
+                <input value={likesInput} onChange={(e) => setLikesInput(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Coffee, retro games, hiking…" />
+              </Field>
+              <div className="flex gap-2">
+                <button onClick={saveBio} className="flex items-center gap-1 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}><Save size={13} /> Save</button>
+                <button onClick={() => setEditingBio(false)} className="px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Endorsements & messages</SectionTitle>
+          {!isSelf && (
+            <div className="flex gap-2 mt-2">
+              <input value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Leave a message for ${selected.name}…`} className="flex-1 border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+              <button onClick={submitMessage} className="px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Post</button>
+            </div>
+          )}
+          <div className="mt-3 space-y-2">
+            {mine.length === 0 && <div className="text-xs" style={{ color: "var(--muted)" }}>No messages yet.</div>}
+            {mine.map((e) => (
+              <div key={e.id} className="text-sm border-t pt-2 flex items-start justify-between gap-2" style={{ borderColor: "var(--line)" }}>
+                <div>
+                  {e.message}
+                  <div className="text-[11px]" style={{ color: "var(--muted)" }}>— {e.fromName}, {new Date(e.date).toLocaleDateString()}</div>
+                </div>
+                {(isSelf || e.fromName === currentUser?.name) && <button onClick={() => deleteEndorsement(e.id)}><X size={13} color="var(--muted)" /></button>}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, exportBackup, restoreBackup, isLead }) {
   const [name, setName] = useState("");
   const [role, setRole] = useState("Requester");
   const [dept, setDept] = useState("Other");
@@ -1449,26 +1915,34 @@ function TeamView({ roster, saveRoster, bgColor, saveBgColor, wallpaperUrl, save
     <div className="space-y-5">
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
         <SectionTitle>Appearance</SectionTitle>
-        <div className="grid sm:grid-cols-2 gap-4 mt-3">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Background color</div>
-            <div className="flex items-center gap-2">
-              <input type="color" value={bgColor || "#F3F1EA"} onChange={(e) => saveBgColor(e.target.value)} className="w-10 h-8 border rounded" style={{ borderColor: "var(--line)" }} />
-              <button onClick={() => saveBgColor("")} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--line)" }}>Reset default</button>
+        <div className="mt-3">
+          <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Wallpaper image</div>
+          <input type="file" accept="image/*" onChange={(e) => handleWallpaper(e.target.files?.[0])} className="text-sm" />
+          {wallpaperUrl && (
+            <div className="mt-2 flex items-center gap-2">
+              <img src={wallpaperUrl} alt="wallpaper preview" className="h-14 rounded border" style={{ borderColor: "var(--line)" }} />
+              <button onClick={clearWallpaper} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Remove wallpaper</button>
             </div>
-            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Applies when no wallpaper is set. Visible to the whole team.</div>
-          </div>
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Wallpaper image</div>
-            <input type="file" accept="image/*" onChange={(e) => handleWallpaper(e.target.files?.[0])} className="text-sm" />
-            {wallpaperUrl && (
-              <div className="mt-2 flex items-center gap-2">
-                <img src={wallpaperUrl} alt="wallpaper preview" className="h-14 rounded border" style={{ borderColor: "var(--line)" }} />
-                <button onClick={clearWallpaper} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Remove wallpaper</button>
-              </div>
-            )}
-            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Overrides the background color when set. Visible to the whole team.</div>
-          </div>
+          )}
+          <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Visible to the whole team.</div>
+        </div>
+      </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Backup & Restore</SectionTitle>
+        <div className="flex flex-wrap gap-3 mt-3 items-center">
+          <button onClick={exportBackup} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>
+            <Download size={13} /> Export backup (JSON)
+          </button>
+          {isLead && (
+            <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
+              <Upload size={13} /> Restore from backup
+              <input type="file" accept=".json" className="hidden" onChange={(e) => restoreBackup(e.target.files?.[0])} />
+            </label>
+          )}
+        </div>
+        <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
+          Includes all requests, the roster, announcements, and reminders. Team photos and inspiration images are not included in the backup file — save those separately if needed. {isLead ? "" : "Only a Team Lead/Admin can restore a backup."}
         </div>
       </div>
 
