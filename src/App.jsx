@@ -1776,6 +1776,12 @@ function ReportsView({ tickets, roster }) {
       };
     });
   const overallOngoing = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
+  const daysBetween = (start, end) => {
+    if (!start) return null;
+    const s = new Date(start + "T00:00:00");
+    const e = end ? new Date(end + "T00:00:00") : new Date(todayISO() + "T00:00:00");
+    return Math.max(0, Math.round((e - s) / 86400000));
+  };
 
   const trend = useMemo(() => {
     if (periodType === "monthly") {
@@ -1851,6 +1857,36 @@ function ReportsView({ tickets, roster }) {
               </tbody>
             </table>
           </div>
+
+          <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+            <SectionTitle>Ongoing projects — full list</SectionTitle>
+            {overallOngoing.length === 0 ? (
+              <EmptyState text="Nothing ongoing right now." />
+            ) : (
+              <table className="w-full text-sm mt-3">
+                <thead>
+                  <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                    <th className="pb-2">Job</th><th className="pb-2">Title</th><th className="pb-2">Assigned to</th><th className="pb-2">Status</th><th className="pb-2">Days running</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...overallOngoing].sort((a, b) => daysBetween(b.dateRequested) - daysBetween(a.dateRequested)).map((t) => {
+                    const days = daysBetween(t.dateRequested);
+                    const overdue = t.dueDate && t.status !== "On Hold" && t.dueDate < todayISO();
+                    return (
+                      <tr key={t.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                        <td className="py-1.5" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")}</td>
+                        <td className="py-1.5 font-medium">{t.title}</td>
+                        <td className="py-1.5">{nameOf(roster, t.assignedTo)}</td>
+                        <td className="py-1.5"><StatusPill status={t.status} /></td>
+                        <td className="py-1.5" style={{ color: overdue ? "var(--coral)" : "var(--ink)" }}>{days} {days === 1 ? "day" : "days"}{overdue ? " (overdue)" : ""}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       ) : (
       <>
@@ -1902,6 +1938,32 @@ function ReportsView({ tickets, roster }) {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Completed projects — {periodLabel} — full list</SectionTitle>
+        {completedInPeriod.length === 0 ? (
+          <EmptyState text="Nothing completed in this period." />
+        ) : (
+          <table className="w-full text-sm mt-3">
+            <thead>
+              <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                <th className="pb-2">Job</th><th className="pb-2">Title</th><th className="pb-2">Assigned to</th><th className="pb-2">Days to complete</th><th className="pb-2">Units</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...completedInPeriod].sort((a, b) => new Date(b.dateCompleted) - new Date(a.dateCompleted)).map((t) => (
+                <tr key={t.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                  <td className="py-1.5" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")}</td>
+                  <td className="py-1.5 font-medium">{t.title}</td>
+                  <td className="py-1.5">{nameOf(roster, t.assignedTo)}</td>
+                  <td className="py-1.5">{daysBetween(t.dateRequested, t.dateCompleted)} days</td>
+                  <td className="py-1.5">{t.units || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
