@@ -10,6 +10,8 @@ import {
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
 import { storage, ticketsApi, chatApi, rosterApi, galleryApi } from "./firebase.js";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
@@ -19,6 +21,7 @@ const DEPTS = ["Social Media", "SEO", "Other"];
 const ROLES = ["Requester", "Artist", "Team Lead", "Admin"];
 const CONTENT_TYPES = ["Static", "Video"];
 const PURPOSES = ["Ads", "YouTube", "TikTok", "Facebook/IG", "Website", "Other"];
+const REVISION_CATEGORIES = ["Typo/Text error", "Wrong color", "Wrong size/dimension", "Layout/alignment", "Wrong image/asset", "Branding inconsistency", "Content/copy change", "Other"];
 
 const PRIORITY_COLOR = { Low: "var(--muted)", Normal: "var(--teal)", High: "var(--amber)", Urgent: "var(--coral)" };
 const PIE_COLORS = ["var(--amber)", "var(--teal)", "var(--coral)", "var(--muted)", "#7A6FB0", "#4C8FBD"];
@@ -523,7 +526,7 @@ export default function CreativeOpsApp() {
         {view === "directory" && <DirectoryView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
         {view === "teamspace" && (
-          <TeamSpaceView
+          <TeamHub
             roster={roster}
             currentUser={currentUser}
             isLead={isLead}
@@ -535,21 +538,14 @@ export default function CreativeOpsApp() {
             galleryItems={galleryItems}
             addGalleryItem={addGalleryItem}
             removeGalleryItem={removeGalleryItem}
-          />
-        )}
-        {view === "chat" && (
-          <ChatView messages={chatMessages} roster={roster} currentUser={currentUser} isLead={isLead} sendMessage={sendChatMessage} deleteMessage={deleteChatMessage} />
-        )}
-        {view === "team" && (
-          <TeamView
-            roster={roster}
-            saveRoster={saveRoster}
+            chatMessages={chatMessages}
+            sendChatMessage={sendChatMessage}
+            deleteChatMessage={deleteChatMessage}
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
             exportBackup={exportBackup}
             restoreBackup={restoreBackup}
-            isLead={isLead}
           />
         )}
       </main>
@@ -686,8 +682,6 @@ function TabBar({ view, setView }) {
     { id: "directory", label: "Directory", icon: FolderOpen },
     { id: "reports", label: "Reports", icon: BarChart3 },
     { id: "teamspace", label: "Team Space", icon: Heart },
-    { id: "chat", label: "Team Chat", icon: MessageSquarePlus },
-    { id: "team", label: "Team", icon: Users },
   ];
   return (
     <div className="border-b" style={{ borderColor: "var(--line)", background: "white" }}>
@@ -903,11 +897,6 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
   const overallCompleted = tickets.filter((t) => t.status === "Completed").length;
   const overallOverdue = tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO()).length;
 
-  const staticCount = tickets.filter((t) => t.contentType === "Static").length;
-  const videoCount = tickets.filter((t) => t.contentType === "Video").length;
-  const allPurposeTags = tickets.flatMap((t) => getPurposes(t));
-  const byPurpose = PURPOSES.map((p) => ({ name: p, value: allPurposeTags.filter((x) => x === p).length })).filter((p) => p.value > 0);
-
   const now = new Date();
   const thisMonthKey = now.toISOString().slice(0, 7);
   const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -988,28 +977,6 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
               </div>
             ))}
           </div>
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Content type mix (all-time)</SectionTitle>
-          <div className="flex gap-4 mt-3">
-            <StatCard label="Static" value={staticCount} icon={ImageIcon} />
-            <StatCard label="Video" value={videoCount} icon={ImageIcon} />
-          </div>
-        </div>
-        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Requests by purpose</SectionTitle>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={byPurpose}>
-              <CartesianGrid stroke="var(--line)" vertical={false} />
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="value" fill="var(--teal)" radius={[3, 3, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
       </div>
     </div>
   );
@@ -1358,6 +1325,7 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
 function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete }) {
   const [note, setNote] = useState("");
   const [revType, setRevType] = useState("minor");
+  const [revCategory, setRevCategory] = useState(REVISION_CATEGORIES[0]);
   const [sat, setSat] = useState(ticket.satisfactionScore || 0);
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
   const [editing, setEditing] = useState(false);
@@ -1396,8 +1364,8 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const addRevision = () => {
     if (!note.trim()) return;
     onUpdate(ticket.id, Object.assign(
-      (t) => ({ ...t, revisions: [...t.revisions, { id: uid(), type: revType, note, taggedBy: currentUser?.name, date: new Date().toISOString() }] }),
-      { __label: `${revType === "minor" ? "Minor" : "Major"} revision logged` }
+      (t) => ({ ...t, revisions: [...t.revisions, { id: uid(), type: revType, category: revCategory, note, taggedBy: currentUser?.name, date: new Date().toISOString() }] }),
+      { __label: `${revType === "minor" ? "Minor" : "Major"} revision logged (${revCategory})` }
     ));
     setNote("");
   };
@@ -1582,12 +1550,15 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
           {(isAssignee || isLead) && !CLOSED_STATUSES.includes(ticket.status) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Log a revision</SectionTitle>
-              <div className="flex gap-2 mt-2">
+              <div className="flex flex-wrap gap-2 mt-2">
                 <select value={revType} onChange={(e) => setRevType(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   <option value="minor">Minor</option>
                   <option value="major">Major</option>
                 </select>
-                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed?" className="flex-1 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+                <select value={revCategory} onChange={(e) => setRevCategory(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
+                  {REVISION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed?" className="flex-1 border rounded px-2 py-1 text-xs min-w-[120px]" style={{ borderColor: "var(--line)" }} />
                 <button onClick={addRevision} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><MessageSquarePlus size={13} /> Add</button>
               </div>
               {!isLead && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Note: only the Team Lead's tagging counts toward official minor/major stats.</div>}
@@ -1700,7 +1671,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
               <div className="mt-2 space-y-1.5 max-h-32 overflow-y-auto">
                 {ticket.revisions.map((r) => (
                   <div key={r.id} className="text-xs">
-                    <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b> — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
+                    <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b>{r.category && <span style={{ color: "var(--muted)" }}> · {r.category}</span>} — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
                   </div>
                 ))}
               </div>
@@ -1734,19 +1705,26 @@ function StarRow({ value, onChange }) {
 }
 
 function ReportsView({ tickets, roster }) {
+  const reportRef = useRef(null);
   const [reportTab, setReportTab] = useState("completed"); // "completed" | "ongoing"
-  const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "daily"
+  const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "daily" | "range"
   const [month, setMonth] = useState(monthKey(todayISO()));
   const [day, setDay] = useState(todayISO());
+  const [rangeStart, setRangeStart] = useState(todayISO());
+  const [rangeEnd, setRangeEnd] = useState(todayISO());
+  const [exportingPdf, setExportingPdf] = useState(false);
 
-  const periodLabel = periodType === "monthly" ? month : day;
-  const completedInPeriod = tickets.filter((t) => {
-    if (t.status !== "Completed") return false;
-    return periodType === "monthly" ? monthKey(t.dateCompleted) === month : t.dateCompleted === day;
-  });
-  const requestedInPeriod = tickets.filter((t) => {
-    return periodType === "monthly" ? monthKey(t.dateRequested) === month : t.dateRequested === day;
-  });
+  const inPeriod = (dateStr) => {
+    if (!dateStr) return false;
+    if (periodType === "monthly") return monthKey(dateStr) === month;
+    if (periodType === "daily") return dateStr === day;
+    return dateStr >= rangeStart && dateStr <= rangeEnd;
+  };
+  const periodLabel = periodType === "monthly" ? month : periodType === "daily" ? day : `${rangeStart}_to_${rangeEnd}`;
+  const periodLabelReadable = periodType === "monthly" ? month : periodType === "daily" ? day : `${rangeStart} to ${rangeEnd}`;
+
+  const completedInPeriod = tickets.filter((t) => t.status === "Completed" && inPeriod(t.dateCompleted));
+  const requestedInPeriod = tickets.filter((t) => inPeriod(t.dateRequested));
 
   const perArtist = roster
     .filter((m) => m.role === "Artist" || m.role === "Team Lead")
@@ -1763,6 +1741,24 @@ function ReportsView({ tickets, roster }) {
   const orgAvgAcc = orgAccs.length ? Math.round(orgAccs.reduce((a, b) => a + b, 0) / orgAccs.length) : null;
   const orgAvgRev = completedInPeriod.length ? completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPeriod.length : 0;
   const orgTotalUnits = completedInPeriod.reduce((s, t) => s + (t.units || 0), 0);
+
+  // Revision category analytics — every revision logged in the period,
+  // across all tickets (not just completed ones), grouped by category.
+  const revisionsInPeriod = tickets.flatMap((t) => t.revisions.map((r) => ({ ...r, ticketNo: t.ticketNo }))).filter((r) => inPeriod((r.date || "").slice(0, 10)));
+  const revisionsByCategory = REVISION_CATEGORIES
+    .map((c) => ({
+      name: c,
+      minor: revisionsInPeriod.filter((r) => (r.category || "Other") === c && r.type === "minor").length,
+      major: revisionsInPeriod.filter((r) => (r.category || "Other") === c && r.type === "major").length,
+    }))
+    .map((row) => ({ ...row, total: row.minor + row.major }))
+    .filter((row) => row.total > 0)
+    .sort((a, b) => b.total - a.total);
+
+  const staticCount = requestedInPeriod.filter((t) => t.contentType === "Static").length;
+  const videoCount = requestedInPeriod.filter((t) => t.contentType === "Video").length;
+  const purposeTagsInPeriod = requestedInPeriod.flatMap((t) => getPurposes(t));
+  const byPurpose = PURPOSES.map((p) => ({ name: p, value: purposeTagsInPeriod.filter((x) => x === p).length })).filter((p) => p.value > 0);
 
   const ongoingByArtist = roster
     .filter((m) => m.role === "Artist" || m.role === "Team Lead")
@@ -1784,36 +1780,37 @@ function ReportsView({ tickets, roster }) {
   };
 
   const trend = useMemo(() => {
-    if (periodType === "monthly") {
-      const months = [];
-      const base = new Date(month + "-01");
-      for (let i = 5; i >= 0; i--) {
-        const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
-        months.push(d.toISOString().slice(0, 7));
+    if (periodType === "daily") {
+      const days = [];
+      const base = new Date(day + "T00:00:00");
+      for (let i = 13; i >= 0; i--) {
+        const d = new Date(base);
+        d.setDate(base.getDate() - i);
+        days.push(d.toISOString().slice(0, 10));
       }
-      return months.map((mk) => {
-        const done = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk);
+      return days.map((dk) => {
+        const done = tickets.filter((t) => t.status === "Completed" && t.dateCompleted === dk);
         const accs = done.map(ticketAccuracy).filter((a) => a !== null);
         return {
-          label: mk.slice(5),
+          label: dk.slice(5),
           completed: done.length,
           accuracy: accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null,
           avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
         };
       });
     }
-    const days = [];
-    const base = new Date(day + "T00:00:00");
-    for (let i = 13; i >= 0; i--) {
-      const d = new Date(base);
-      d.setDate(base.getDate() - i);
-      days.push(d.toISOString().slice(0, 10));
+    if (periodType === "range") return null; // trend line doesn't apply to an arbitrary custom range
+    const months = [];
+    const base = new Date(month + "-01");
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+      months.push(d.toISOString().slice(0, 7));
     }
-    return days.map((dk) => {
-      const done = tickets.filter((t) => t.status === "Completed" && t.dateCompleted === dk);
+    return months.map((mk) => {
+      const done = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk);
       const accs = done.map(ticketAccuracy).filter((a) => a !== null);
       return {
-        label: dk.slice(5),
+        label: mk.slice(5),
         completed: done.length,
         accuracy: accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null,
         avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
@@ -1823,15 +1820,48 @@ function ReportsView({ tickets, roster }) {
 
   const priorityBreakdown = PRIORITIES.map((p) => ({ name: p, value: tickets.filter((t) => t.priority === p && t.status !== "Completed").length }));
 
+  const exportPdf = async () => {
+    if (!reportRef.current) return;
+    setExportingPdf(true);
+    try {
+      const canvas = await html2canvas(reportRef.current, { scale: 2, backgroundColor: "#ffffff", useCORS: true });
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let heightLeft = imgHeight;
+      let position = 0;
+      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+      pdf.save(`job-docket-report-${periodLabel}.pdf`);
+    } catch (e) {
+      window.alert("PDF export failed. Try again, or use the CSV export instead.");
+    }
+    setExportingPdf(false);
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex border rounded overflow-hidden w-fit" style={{ borderColor: "var(--line)" }}>
-        <button onClick={() => setReportTab("completed")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "completed" ? "var(--ink)" : "white", color: reportTab === "completed" ? "white" : "var(--ink)" }}>Completed Report</button>
-        <button onClick={() => setReportTab("ongoing")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "ongoing" ? "var(--ink)" : "white", color: reportTab === "ongoing" ? "white" : "var(--ink)" }}>Ongoing Projects</button>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex border rounded overflow-hidden w-fit" style={{ borderColor: "var(--line)" }}>
+          <button onClick={() => setReportTab("completed")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "completed" ? "var(--ink)" : "white", color: reportTab === "completed" ? "white" : "var(--ink)" }}>Completed Report</button>
+          <button onClick={() => setReportTab("ongoing")} className="px-4 py-1.5 text-xs font-semibold" style={{ background: reportTab === "ongoing" ? "var(--ink)" : "white", color: reportTab === "ongoing" ? "white" : "var(--ink)" }}>Ongoing Projects</button>
+        </div>
+        <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-50" style={{ background: "var(--coral)" }}>
+          <Download size={13} /> {exportingPdf ? "Generating…" : "Export PDF (with charts) — for email"}
+        </button>
       </div>
 
       {reportTab === "ongoing" ? (
-        <div className="space-y-6">
+        <div className="space-y-6" ref={reportRef}>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             <StatCard label="Ongoing (overall)" value={overallOngoing.length} icon={KanbanSquare} />
             <StatCard label="Overdue (overall)" value={overallOngoing.filter((t) => t.dueDate && t.status !== "On Hold" && t.dueDate < todayISO()).length} icon={AlertTriangle} />
@@ -1889,20 +1919,29 @@ function ReportsView({ tickets, roster }) {
           </div>
         </div>
       ) : (
-      <>
+      <div className="space-y-6" ref={reportRef}>
       <div className="flex flex-wrap items-center gap-3">
         <SectionTitle>Report period</SectionTitle>
         <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
           <button onClick={() => setPeriodType("monthly")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "monthly" ? "var(--ink)" : "white", color: periodType === "monthly" ? "white" : "var(--ink)" }}>Monthly</button>
           <button onClick={() => setPeriodType("daily")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "daily" ? "var(--ink)" : "white", color: periodType === "daily" ? "white" : "var(--ink)" }}>Daily</button>
+          <button onClick={() => setPeriodType("range")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "range" ? "var(--ink)" : "white", color: periodType === "range" ? "white" : "var(--ink)" }}>Custom Range</button>
         </div>
-        {periodType === "monthly" ? (
+        {periodType === "monthly" && (
           <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
-        ) : (
+        )}
+        {periodType === "daily" && (
           <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
         )}
+        {periodType === "range" && (
+          <div className="flex items-center gap-1.5 text-sm">
+            <input type="date" value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+            <span style={{ color: "var(--muted)" }}>to</span>
+            <input type="date" value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+          </div>
+        )}
         <button onClick={() => downloadCSV(ticketsToCSV(completedInPeriod, roster), `job-docket-report-${periodLabel}.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
-          <Download size={13} /> Export {periodLabel} CSV
+          <Download size={13} /> Export {periodLabelReadable} CSV
         </button>
         <button onClick={() => downloadCSV(ticketsToCSV(tickets, roster), `job-docket-all-data.csv`)} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
           <Download size={13} /> Export all data CSV
@@ -1919,7 +1958,7 @@ function ReportsView({ tickets, roster }) {
       </div>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Per team member — {periodLabel}</SectionTitle>
+        <SectionTitle>Per team member — {periodLabelReadable}</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
             <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
@@ -1941,7 +1980,7 @@ function ReportsView({ tickets, roster }) {
       </div>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Completed projects — {periodLabel} — full list</SectionTitle>
+        <SectionTitle>Completed projects — {periodLabelReadable} — full list</SectionTitle>
         {completedInPeriod.length === 0 ? (
           <EmptyState text="Nothing completed in this period." />
         ) : (
@@ -1968,7 +2007,7 @@ function ReportsView({ tickets, roster }) {
 
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Completed per member — {periodLabel}</SectionTitle>
+          <SectionTitle>Completed per member — {periodLabelReadable}</SectionTitle>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={perArtist}>
               <CartesianGrid stroke="var(--line)" vertical={false} />
@@ -1979,19 +2018,83 @@ function ReportsView({ tickets, roster }) {
             </BarChart>
           </ResponsiveContainer>
         </div>
+        {trend && (
+          <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+            <SectionTitle>{periodType === "monthly" ? "Last 6 months" : "Last 14 days"} — accuracy & revisions</SectionTitle>
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={trend}>
+                <CartesianGrid stroke="var(--line)" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={periodType === "daily" ? 1 : 0} angle={periodType === "daily" ? -35 : 0} textAnchor={periodType === "daily" ? "end" : "middle"} height={periodType === "daily" ? 45 : 30} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="accuracy" stroke="var(--teal)" strokeWidth={2} dot={false} name="Accuracy" />
+                <Line type="monotone" dataKey="avgRevisions" stroke="var(--coral)" strokeWidth={2} dot={false} name="Avg revisions" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Revision categories — {periodLabelReadable} ({revisionsInPeriod.length} revisions logged)</SectionTitle>
+        {revisionsByCategory.length === 0 ? (
+          <EmptyState text="No revisions logged in this period." />
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={Math.max(160, revisionsByCategory.length * 34)}>
+              <BarChart data={revisionsByCategory} layout="vertical" margin={{ left: 20 }}>
+                <CartesianGrid stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={140} />
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Bar dataKey="minor" stackId="a" fill="var(--amber)" name="Minor" radius={[0, 0, 0, 0]} />
+                <Bar dataKey="major" stackId="a" fill="var(--coral)" name="Major" radius={[0, 3, 3, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <table className="w-full text-sm mt-4">
+              <thead>
+                <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                  <th className="pb-2">Category</th><th className="pb-2">Minor</th><th className="pb-2">Major</th><th className="pb-2">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {revisionsByCategory.map((row) => (
+                  <tr key={row.name} className="border-t" style={{ borderColor: "var(--line)" }}>
+                    <td className="py-1.5 font-medium">{row.name}</td>
+                    <td className="py-1.5">{row.minor}</td>
+                    <td className="py-1.5">{row.major}</td>
+                    <td className="py-1.5 font-semibold">{row.total}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>{periodType === "monthly" ? "Last 6 months" : "Last 14 days"} — accuracy & revisions</SectionTitle>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={trend}>
-              <CartesianGrid stroke="var(--line)" vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={periodType === "daily" ? 1 : 0} angle={periodType === "daily" ? -35 : 0} textAnchor={periodType === "daily" ? "end" : "middle"} height={periodType === "daily" ? 45 : 30} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              <Line type="monotone" dataKey="accuracy" stroke="var(--teal)" strokeWidth={2} dot={false} name="Accuracy" />
-              <Line type="monotone" dataKey="avgRevisions" stroke="var(--coral)" strokeWidth={2} dot={false} name="Avg revisions" />
-            </LineChart>
-          </ResponsiveContainer>
+          <SectionTitle>Content type mix — {periodLabelReadable}</SectionTitle>
+          <div className="flex gap-4 mt-3">
+            <StatCard label="Static" value={staticCount} icon={ImageIcon} />
+            <StatCard label="Video" value={videoCount} icon={ImageIcon} />
+          </div>
+        </div>
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Requests by purpose — {periodLabelReadable}</SectionTitle>
+          {byPurpose.length === 0 ? <EmptyState text="No requests logged in this period." /> : (
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={byPurpose}>
+                <CartesianGrid stroke="var(--line)" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip />
+                <Bar dataKey="value" fill="var(--teal)" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 
@@ -2007,7 +2110,74 @@ function ReportsView({ tickets, roster }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
-      </>
+      </div>
+      )}
+    </div>
+  );
+}
+
+function TeamHub(props) {
+  const [sub, setSub] = useState("profiles");
+  const subtabs = [
+    { id: "profiles", label: "Profiles", icon: Heart },
+    { id: "chat", label: "Chat", icon: MessageSquarePlus },
+    { id: "roster", label: "Roster & Settings", icon: Users },
+  ];
+  return (
+    <div>
+      <div className="flex gap-1 mb-4 border rounded-md p-1 w-fit" style={{ borderColor: "var(--line)", background: "white" }}>
+        {subtabs.map((t) => {
+          const Icon = t.icon;
+          const active = sub === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setSub(t.id)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-semibold"
+              style={{ background: active ? "var(--ink)" : "transparent", color: active ? "white" : "var(--muted)" }}
+            >
+              <Icon size={14} /> {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {sub === "profiles" && (
+        <TeamSpaceView
+          roster={props.roster}
+          currentUser={props.currentUser}
+          isLead={props.isLead}
+          endorsements={props.endorsements}
+          addEndorsement={props.addEndorsement}
+          deleteEndorsement={props.deleteEndorsement}
+          saveRoster={props.saveRoster}
+          tickets={props.tickets}
+          galleryItems={props.galleryItems}
+          addGalleryItem={props.addGalleryItem}
+          removeGalleryItem={props.removeGalleryItem}
+        />
+      )}
+      {sub === "chat" && (
+        <ChatView
+          messages={props.chatMessages}
+          roster={props.roster}
+          currentUser={props.currentUser}
+          isLead={props.isLead}
+          sendMessage={props.sendChatMessage}
+          deleteMessage={props.deleteChatMessage}
+        />
+      )}
+      {sub === "roster" && (
+        <TeamView
+          roster={props.roster}
+          saveRoster={props.saveRoster}
+          wallpaperUrl={props.wallpaperUrl}
+          saveWallpaper={props.saveWallpaper}
+          clearWallpaper={props.clearWallpaper}
+          exportBackup={props.exportBackup}
+          restoreBackup={props.restoreBackup}
+          isLead={props.isLead}
+        />
       )}
     </div>
   );
