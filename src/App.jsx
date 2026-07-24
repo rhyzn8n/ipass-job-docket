@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout, uploadAudioFile, deleteAudioFile } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -78,6 +78,21 @@ function seedRoster() {
 
 function nameOf(roster, id) {
   return roster.find((m) => m.id === id)?.name || "Unassigned";
+}
+
+// A palette wide enough that a small team never repeats colors by accident.
+const MEMBER_COLOR_PALETTE = [
+  "#D99A2B", "#2E6B60", "#C6543D", "#4C6FA8", "#7A6FB0",
+  "#3E8E7E", "#B0555F", "#5C8A3A", "#A87A3E", "#4C8FBD",
+];
+// Admin can pick a custom color per person (roster.color); otherwise everyone
+// gets a stable color derived from their id, so it never changes on reload.
+function memberColor(member) {
+  if (!member) return "var(--muted)";
+  if (member.color) return member.color;
+  let hash = 0;
+  for (const ch of member.id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return MEMBER_COLOR_PALETTE[hash % MEMBER_COLOR_PALETTE.length];
 }
 
 // Backward compatible: old tickets have a single `purpose` string,
@@ -300,6 +315,11 @@ export default function CreativeOpsApp() {
   const [openTicketId, setOpenTicketId] = useState(null);
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
+
+  useEffect(() => {
+    const link = document.getElementById("app-favicon");
+    if (link && logoUrl) link.href = logoUrl;
+  }, [logoUrl]);
 
   const [announcements, setAnnouncements] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -827,8 +847,10 @@ function TabBar({ view, setView }) {
 
 function TicketCard({ ticket, roster, onOpen }) {
   const overdue = ticket.dueDate && !PAUSED_STATUSES.includes(ticket.status) && ticket.dueDate < todayISO();
+  const assignee = roster.find((m) => m.id === ticket.assignedTo);
+  const accent = memberColor(assignee);
   return (
-    <button onClick={() => onOpen(ticket.id)} className="text-left w-full bg-white rounded-md shadow-sm border hover:shadow-md transition-shadow" style={{ borderColor: "var(--line)" }}>
+    <button onClick={() => onOpen(ticket.id)} className="text-left w-full bg-white rounded-md shadow-sm border hover:shadow-md transition-shadow" style={{ borderColor: "var(--line)", borderLeft: `4px solid ${accent}` }}>
       <div className="docket-perf" />
       <div className="p-3">
         <div className="flex items-center justify-between mb-1.5">
@@ -839,7 +861,8 @@ function TicketCard({ ticket, roster, onOpen }) {
           </div>
         </div>
         <div className="font-semibold text-sm leading-snug mb-1">{ticket.title}</div>
-        <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+        <div className="text-xs mb-2 flex items-center gap-1.5" style={{ color: "var(--muted)" }}>
+          <span className="inline-block rounded-full flex-shrink-0" style={{ width: 8, height: 8, background: accent }} />
           {ticket.dept} · {ticket.contentType || "—"}{getPurposes(ticket).length ? ` · ${getPurposes(ticket).join(", ")}` : ""} · {nameOf(roster, ticket.assignedTo)}
         </div>
         <div className="flex items-center justify-between">
@@ -955,9 +978,16 @@ function RemindersPanel({ reminders, addReminder, deleteReminder }) {
 function LeaderboardPanel({ tickets, roster }) {
   const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const ranked = members
-    .map((m) => ({ member: m, completed: tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed").length }))
+    .map((m) => {
+      const done = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed");
+      const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
+      // Completions carry the most weight, but a lower average revision count
+      // (fewer minor/major revisions per project) pulls someone up the board —
+      // most completed AND cleanest work wins, not just raw volume.
+      return { member: m, completed: done.length, avgRev: Number(avgRev.toFixed(2)), score: done.length - avgRev };
+    })
     .filter((r) => r.completed > 0)
-    .sort((a, b) => b.completed - a.completed)
+    .sort((a, b) => b.score - a.score || b.completed - a.completed || a.avgRev - b.avgRev)
     .slice(0, 5);
 
   const medalColor = ["#D9A441", "#A8A8A8", "#B08D57"];
@@ -967,7 +997,7 @@ function LeaderboardPanel({ tickets, roster }) {
     <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
       <div className="flex items-center gap-1.5">
         <Trophy size={14} color="var(--amber)" />
-        <SectionTitle>Leaderboard — most completed (all-time)</SectionTitle>
+        <SectionTitle>Leaderboard — most completed, lowest revisions (all-time)</SectionTitle>
       </div>
       {ranked.length === 0 ? (
         <EmptyState text="No completed projects yet — first one on the board wins." />
@@ -983,7 +1013,9 @@ function LeaderboardPanel({ tickets, roster }) {
               </div>
               <div className="flex-1">
                 <div className={i === 0 ? "text-base font-black" : "text-sm font-semibold"} style={i === 0 ? { fontFamily: "var(--font-display)" } : {}}>{r.member.name}</div>
-                {i === 0 && <div className="text-[11px]" style={{ color: "var(--amber)" }}>Top performer</div>}
+                <div className="text-[11px]" style={{ color: i === 0 ? "var(--amber)" : "var(--muted)" }}>
+                  {i === 0 ? "Top performer — " : ""}{r.completed} completed · {r.avgRev} avg revisions
+                </div>
               </div>
               <div className={i === 0 ? "text-xl font-black" : "text-sm font-black"} style={{ fontFamily: "var(--font-display)" }}>{r.completed}</div>
             </div>
@@ -1330,6 +1362,13 @@ function BoardView({ tickets, roster, onOpen }) {
           <option value="">All priorities</option>
           {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
+        <div className="flex flex-wrap gap-2 ml-auto">
+          {roster.filter((m) => m.role === "Artist" || m.role === "Team Lead").map((m) => (
+            <span key={m.id} className="flex items-center gap-1 text-[11px]" style={{ color: "var(--muted)" }}>
+              <span className="inline-block rounded-full" style={{ width: 9, height: 9, background: memberColor(m) }} /> {m.name}
+            </span>
+          ))}
+        </div>
       </div>
       <div className="flex gap-3 overflow-x-auto pb-4">
         {STATUSES.map((s) => (
@@ -2133,32 +2172,6 @@ function ReportsView({ tickets, roster }) {
         </table>
       </div>
 
-      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Completed projects — {periodLabelReadable} — full list</SectionTitle>
-        {completedInPeriod.length === 0 ? (
-          <EmptyState text="Nothing completed in this period." />
-        ) : (
-          <table className="w-full text-sm mt-3">
-            <thead>
-              <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-                <th className="pb-2">Job</th><th className="pb-2">Title</th><th className="pb-2">Assigned to</th><th className="pb-2">Days to complete</th><th className="pb-2">Units</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...completedInPeriod].sort((a, b) => new Date(b.dateCompleted) - new Date(a.dateCompleted)).map((t) => (
-                <tr key={t.id} className="border-t" style={{ borderColor: "var(--line)" }}>
-                  <td className="py-1.5" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")}</td>
-                  <td className="py-1.5 font-medium">{t.title}</td>
-                  <td className="py-1.5">{nameOf(roster, t.assignedTo)}</td>
-                  <td className="py-1.5">{daysBetween(t.dateRequested, t.dateCompleted)} days</td>
-                  <td className="py-1.5">{t.units || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
           <SectionTitle>Completed per member — {periodLabelReadable}</SectionTitle>
@@ -2168,7 +2181,7 @@ function ReportsView({ tickets, roster }) {
               <XAxis dataKey="name" tick={{ fontSize: 10 }} interval={0} angle={-15} textAnchor="end" height={50} />
               <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
               <Tooltip />
-              <Bar dataKey="completed" fill="var(--amber)" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="completed" fill="var(--amber)" radius={[3, 3, 0, 0]} label={{ position: "top" }} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -2308,6 +2321,32 @@ function ReportsView({ tickets, roster }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Completed projects — {periodLabelReadable} — full list</SectionTitle>
+        {completedInPeriod.length === 0 ? (
+          <EmptyState text="Nothing completed in this period." />
+        ) : (
+          <table className="w-full text-sm mt-3">
+            <thead>
+              <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                <th className="pb-2">Job</th><th className="pb-2">Title</th><th className="pb-2">Assigned to</th><th className="pb-2">Days to complete</th><th className="pb-2">Units</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...completedInPeriod].sort((a, b) => new Date(b.dateCompleted) - new Date(a.dateCompleted)).map((t) => (
+                <tr key={t.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                  <td className="py-1.5" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>JOB-{String(t.ticketNo).padStart(4, "0")}</td>
+                  <td className="py-1.5 font-medium">{t.title}</td>
+                  <td className="py-1.5">{nameOf(roster, t.assignedTo)}</td>
+                  <td className="py-1.5">{daysBetween(t.dateRequested, t.dateCompleted)} days</td>
+                  <td className="py-1.5">{t.units || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
       </div>
       )}
     </div>
@@ -2393,6 +2432,9 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   const [profileWallpaper, setProfileWallpaper] = useState(null);
   const [pendingHasWallpaper, setPendingHasWallpaper] = useState(false);
   const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", favoriteMusic: "", wishlist: "", quote: "" });
+  const [pendingSongUrl, setPendingSongUrl] = useState(null);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
+  const [audioError, setAudioError] = useState("");
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
@@ -2413,6 +2455,8 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
         wishlist: selected.wishlist || "", quote: selected.quote || "",
       });
       setPendingHasWallpaper(!!selected.hasProfileWallpaper);
+      setPendingSongUrl(selected.favoriteSongUrl || null);
+      setAudioError("");
       if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
       else setProfileWallpaper(null);
     }
@@ -2421,11 +2465,37 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  const MAX_AUDIO_MB = 15;
+  const handleAudioUpload = async (file) => {
+    if (!file || !selected) return;
+    setAudioError("");
+    if (!file.type.startsWith("audio/")) {
+      setAudioError("That doesn't look like an audio file.");
+      return;
+    }
+    if (file.size > MAX_AUDIO_MB * 1024 * 1024) {
+      setAudioError(`File is too large — keep it under ${MAX_AUDIO_MB}MB.`);
+      return;
+    }
+    setUploadingAudio(true);
+    try {
+      const url = await uploadAudioFile(selected.id, file);
+      setPendingSongUrl(url);
+    } catch (e) {
+      setAudioError("Upload failed. Check your connection and try again.");
+    }
+    setUploadingAudio(false);
+  };
+  const handleRemoveAudio = async () => {
+    await deleteAudioFile(selected.id);
+    setPendingSongUrl(null);
+  };
+
   // Wallpaper flag is saved together with the rest of the profile fields in
   // one write (not as a separate save call) so a photo upload followed
   // quickly by "Save" can never overwrite each other.
   const saveProfile = () => {
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper } : m)));
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper, favoriteSongUrl: pendingSongUrl } : m)));
     setEditingBio(false);
   };
 
@@ -2536,6 +2606,12 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
                   {selected.mobile && <div><b style={{ color: "var(--ink)" }}>Mobile:</b> {selected.mobile}</div>}
                   {selected.email && <div><b style={{ color: "var(--ink)" }}>Email:</b> {selected.email}</div>}
                 </div>
+                {selected.favoriteSongUrl && (
+                  <div className="pt-2">
+                    <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Favorite song</div>
+                    <audio controls src={selected.favoriteSongUrl} className="w-full" style={{ height: 32 }} />
+                  </div>
+                )}
               </div>
             ) : (
               <div className="space-y-3">
@@ -2543,6 +2619,17 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
                   <input type="file" accept="image/*" onChange={(e) => handleProfileWallpaper(e.target.files?.[0])} className="text-sm" />
                   {profileWallpaper && (
                     <button onClick={clearProfileWallpaper} className="ml-2 text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
+                  )}
+                </Field>
+                <Field label={`Favorite song, full audio (optional, up to ${MAX_AUDIO_MB}MB)`}>
+                  <input type="file" accept="audio/*" onChange={(e) => handleAudioUpload(e.target.files?.[0])} className="text-sm" />
+                  {uploadingAudio && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Uploading…</div>}
+                  {audioError && <div className="text-xs mt-1" style={{ color: "var(--coral)" }}>{audioError}</div>}
+                  {pendingSongUrl && !uploadingAudio && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <audio controls src={pendingSongUrl} className="flex-1" style={{ height: 32 }} />
+                      <button onClick={handleRemoveAudio} className="text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
+                    </div>
                   )}
                 </Field>
                 <Field label="Bio">
@@ -2558,7 +2645,7 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
                   <Field label="Favorite food">
                     <input value={form.favoriteFood} onChange={(e) => setField("favoriteFood", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
                   </Field>
-                  <Field label="Favorite music">
+                  <Field label="Favorite music (artist/song name)">
                     <input value={form.favoriteMusic} onChange={(e) => setField("favoriteMusic", e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="Artists, genres, a song…" />
                   </Field>
                   <Field label="Wishlist">
@@ -2786,7 +2873,7 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
         <SectionTitle>Team roster{!isAdmin && " (view only — Admin manages this)"}</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Photo</th><th className="pb-2">Name</th><th className="pb-2">Login email</th><th className="pb-2">Role</th><th className="pb-2">Dept</th>{isAdmin && <th className="pb-2"></th>}</tr>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Photo</th><th className="pb-2">Color</th><th className="pb-2">Name</th><th className="pb-2">Login email</th><th className="pb-2">Role</th><th className="pb-2">Dept</th>{isAdmin && <th className="pb-2"></th>}</tr>
           </thead>
           <tbody>
             {roster.map((m) => (
@@ -2803,6 +2890,13 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
                   )}
                   {uploadingId === m.id && <div className="text-[10px]" style={{ color: "var(--muted)" }}>uploading…</div>}
                   {isAdmin && m.hasPhoto && <button onClick={() => handleRemovePhoto(m.id)} className="text-[10px]" style={{ color: "var(--coral)" }}>remove</button>}
+                </td>
+                <td className="py-1.5">
+                  {isAdmin ? (
+                    <input type="color" value={m.color || memberColor(m)} onChange={(e) => update(m.id, { color: e.target.value })} className="w-8 h-7 border rounded" style={{ borderColor: "var(--line)" }} />
+                  ) : (
+                    <span className="inline-block rounded-full" style={{ width: 16, height: 16, background: memberColor(m) }} />
+                  )}
                 </td>
                 <td className="py-1.5">
                   {isAdmin ? (
