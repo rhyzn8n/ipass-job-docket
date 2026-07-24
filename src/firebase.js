@@ -24,15 +24,16 @@ const fbStorage = getStorage(app);
 // document (like a full-length song). Files are streamed, not text-encoded,
 // so there's no 1MB document ceiling and playback doesn't load the whole
 // file into memory at once the way a Firestore-stored data URL would.
-export async function uploadAudioFile(memberId, file) {
-  const path = `profile_audio/${memberId}`;
-  const ref = storageRef(fbStorage, path);
+// Music Corner: each track is its own file (not tied to a fixed slot per
+// person), so one member can have up to a few tracks at once.
+export async function uploadMusicTrack(trackId, file) {
+  const ref = storageRef(fbStorage, `music_corner/${trackId}`);
   await uploadBytes(ref, file);
   return getDownloadURL(ref);
 }
-export async function deleteAudioFile(memberId) {
+export async function deleteMusicTrackFile(trackId) {
   try {
-    await deleteObject(storageRef(fbStorage, `profile_audio/${memberId}`));
+    await deleteObject(storageRef(fbStorage, `music_corner/${trackId}`));
   } catch (e) {
     // Fine if it was already missing.
   }
@@ -143,3 +144,5 @@ export const rosterApi = makeCollectionApi("roster_v2");
 // Each gallery photo is its own document too, so adding/removing one photo
 // never touches anyone else's gallery items.
 export const galleryApi = makeCollectionApi("profile_gallery");
+// Music Corner tracks — one document per uploaded song.
+export const musicApi = makeCollectionApi("music_corner_tracks");
