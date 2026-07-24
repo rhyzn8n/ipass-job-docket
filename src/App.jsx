@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout, uploadAudioFile, deleteAudioFile } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout, uploadAudioFile, deleteAudioFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -24,7 +24,7 @@ const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "R
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
 const PAUSED_STATUSES = ["On Hold", "Completed", "Cancelled"]; // excluded from overdue alerts
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
-const DEPTS = ["Social Media", "SEO", "Other"];
+const DEPTS = ["Social Media", "SEO", "Digital Marketing", "Operations", "Management", "Finance", "Other"];
 const ROLES = ["Requester", "Artist", "Team Lead"]; // Admin is not assignable here — see ADMIN_EMAILS above
 const CONTENT_TYPES = [
   "Static – Social Media",
@@ -487,12 +487,14 @@ export default function CreativeOpsApp() {
     try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
   };
 
-  const sendChatMessage = async (text) => {
-    if (!text.trim() || !currentUser) return;
-    await chatApi.upsert({ id: uid(), text: text.trim(), by: currentUser.name, byId: currentUser.id, date: new Date().toISOString() });
+  const sendChatMessage = async (text, attachmentUrl) => {
+    if ((!text || !text.trim()) && !attachmentUrl) return;
+    if (!currentUser) return;
+    await chatApi.upsert({ id: uid(), text: (text || "").trim(), attachmentUrl: attachmentUrl || null, by: currentUser.name, byId: currentUser.id, date: new Date().toISOString() });
   };
-  const deleteChatMessage = async (id) => {
+  const deleteChatMessage = async (id, attachmentUrl) => {
     await chatApi.remove(id);
+    if (attachmentUrl) await deleteChatAttachment(attachmentUrl);
   };
 
   const addGalleryItem = async (memberId, dataUrl, caption) => {
@@ -873,8 +875,14 @@ function TicketCard({ ticket, roster, onOpen }) {
         </div>
         <div className="font-semibold text-sm leading-snug mb-1">{ticket.title}</div>
         <div className="text-xs mb-2 flex items-center gap-1.5" style={{ color: "var(--muted)" }}>
-          <span className="inline-block rounded-full flex-shrink-0" style={{ width: 8, height: 8, background: accent }} />
-          {ticket.dept} · {ticket.contentType || "—"}{getPurposes(ticket).length ? ` · ${getPurposes(ticket).join(", ")}` : ""} · {nameOf(roster, ticket.assignedTo)}
+          {assignee ? (
+            <span className="flex-shrink-0 rounded-full" style={{ border: `2px solid ${accent}`, lineHeight: 0 }}>
+              <Avatar member={assignee} size={18} />
+            </span>
+          ) : (
+            <span className="inline-block rounded-full flex-shrink-0" style={{ width: 8, height: 8, background: accent }} />
+          )}
+          <span className="truncate">{ticket.dept} · {ticket.contentType || "—"}{getPurposes(ticket).length ? ` · ${getPurposes(ticket).join(", ")}` : ""} · {nameOf(roster, ticket.assignedTo)}</span>
         </div>
         <div className="flex items-center justify-between">
           <StatusPill status={ticket.status} />
@@ -1198,17 +1206,18 @@ function RequestsPanel({ tickets, roster, onOpen }) {
   );
 }
 
-function StatCard({ label, value, icon: Icon, alert, trendPct }) {
+function StatCard({ label, value, icon: Icon, alert, trendPct, invertTrend, trendLabel }) {
   const hasTrend = trendPct !== undefined && trendPct !== null;
   const up = hasTrend && trendPct >= 0;
+  const good = invertTrend ? !up : up;
   return (
     <div className="bg-white border rounded-md p-3 flex-1" style={{ borderColor: alert ? "var(--coral)" : "var(--line)" }}>
       <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--muted)" }}><Icon size={13} /> {label}</div>
       <div className="flex items-baseline gap-2 mt-1">
         <div className="text-2xl font-black" style={{ fontFamily: "var(--font-display)", color: alert ? "var(--coral)" : "var(--ink)" }}>{value}</div>
         {hasTrend && (
-          <span className="text-[11px] font-semibold" style={{ color: up ? "var(--teal)" : "var(--coral)" }}>
-            {up ? "▲" : "▼"} {Math.abs(trendPct)}% vs last month
+          <span className="text-[11px] font-semibold" style={{ color: good ? "var(--teal)" : "var(--coral)" }}>
+            {up ? "▲" : "▼"} {Math.abs(trendPct)}% {trendLabel || "vs last month"}
           </span>
         )}
       </div>
@@ -1464,6 +1473,9 @@ function DirectoryView({ tickets, roster, onOpen }) {
 
 function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMessage }) {
   const [text, setText] = useState("");
+  const [pendingAttachment, setPendingAttachment] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [attachError, setAttachError] = useState("");
   const sorted = [...messages].sort((a, b) => new Date(a.date) - new Date(b.date));
   const bottomRef = useRef(null);
 
@@ -1471,11 +1483,34 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
+  const MAX_ATTACHMENT_MB = 8;
+  const handleAttach = async (file) => {
+    if (!file) return;
+    setAttachError("");
+    if (!file.type.startsWith("image/")) {
+      setAttachError("Only images and GIFs are supported.");
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_MB * 1024 * 1024) {
+      setAttachError(`Keep it under ${MAX_ATTACHMENT_MB}MB.`);
+      return;
+    }
+    setUploading(true);
+    try {
+      const url = await uploadChatAttachment(uid(), file);
+      setPendingAttachment(url);
+    } catch (e) {
+      setAttachError("Upload failed. Try again.");
+    }
+    setUploading(false);
+  };
+
   const submit = (e) => {
     e.preventDefault();
-    if (!text.trim()) return;
-    sendMessage(text);
+    if (!text.trim() && !pendingAttachment) return;
+    sendMessage(text, pendingAttachment);
     setText("");
+    setPendingAttachment(null);
   };
 
   const memberFor = (byId) => roster.find((m) => m.id === byId);
@@ -1493,12 +1528,17 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
             <div key={m.id} className={`flex items-start gap-2 ${isMine ? "flex-row-reverse" : ""}`}>
               <Avatar member={memberFor(m.byId)} size={26} />
               <div className={`max-w-[70%] ${isMine ? "items-end" : "items-start"} flex flex-col`}>
-                <div className="rounded-lg px-3 py-1.5 text-sm" style={{ background: isMine ? "var(--ink)" : "var(--paper)", color: isMine ? "white" : "var(--ink)" }}>
-                  {m.text}
-                </div>
+                {m.attachmentUrl && (
+                  <img src={m.attachmentUrl} alt="shared" className="rounded-lg mb-1 max-h-56 max-w-full" style={{ border: "1px solid var(--line)" }} />
+                )}
+                {m.text && (
+                  <div className="rounded-lg px-3 py-1.5 text-sm" style={{ background: isMine ? "var(--ink)" : "var(--paper)", color: isMine ? "white" : "var(--ink)" }}>
+                    {m.text}
+                  </div>
+                )}
                 <div className="text-[10px] mt-0.5 flex items-center gap-1.5" style={{ color: "var(--muted)" }}>
                   {m.by} · {new Date(m.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  {(isMine || isLead) && <button onClick={() => deleteMessage(m.id)}><X size={10} /></button>}
+                  {(isMine || isLead) && <button onClick={() => deleteMessage(m.id, m.attachmentUrl)}><X size={10} /></button>}
                 </div>
               </div>
             </div>
@@ -1506,7 +1546,22 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
         })}
         <div ref={bottomRef} />
       </div>
-      <form onSubmit={submit} className="p-3 border-t flex gap-2" style={{ borderColor: "var(--line)" }}>
+      {pendingAttachment && (
+        <div className="px-3 pt-2 flex items-center gap-2">
+          <img src={pendingAttachment} alt="attachment preview" className="h-14 rounded border" style={{ borderColor: "var(--line)" }} />
+          <button onClick={() => setPendingAttachment(null)} className="text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
+        </div>
+      )}
+      {(uploading || attachError) && (
+        <div className="px-3 pt-1 text-xs" style={{ color: attachError ? "var(--coral)" : "var(--muted)" }}>
+          {attachError || "Uploading…"}
+        </div>
+      )}
+      <form onSubmit={submit} className="p-3 border-t flex gap-2 items-center" style={{ borderColor: "var(--line)" }}>
+        <label className="cursor-pointer flex-shrink-0" title="Attach image or GIF">
+          <ImageIcon size={18} color="var(--muted)" />
+          <input type="file" accept="image/*" className="hidden" onChange={(e) => handleAttach(e.target.files?.[0])} />
+        </label>
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Message the team…" className="flex-1 border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
         <button type="submit" className="px-4 py-2 rounded text-white text-sm font-semibold flex items-center gap-1.5" style={{ background: "var(--ink)" }}><Send size={14} /> Send</button>
       </form>
@@ -1936,6 +1991,28 @@ function ReportsView({ tickets, roster }) {
   const orgAvgRev = completedInPeriod.length ? completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPeriod.length : 0;
   const orgTotalUnits = completedInPeriod.reduce((s, t) => s + (t.units || 0), 0);
 
+  // Previous-period comparison ("vs last month" / "vs yesterday") — only
+  // meaningful for monthly/daily modes, since a custom range has no fixed
+  // equivalent "previous" range to compare against.
+  const prevPeriodKey = periodType === "monthly"
+    ? (() => { const b = new Date(month + "-01"); return new Date(b.getFullYear(), b.getMonth() - 1, 1).toISOString().slice(0, 7); })()
+    : periodType === "daily"
+    ? (() => { const b = new Date(day + "T00:00:00"); b.setDate(b.getDate() - 1); return b.toISOString().slice(0, 10); })()
+    : null;
+  const completedInPrevPeriod = prevPeriodKey
+    ? tickets.filter((t) => t.status === "Completed" && (periodType === "monthly" ? monthKey(t.dateCompleted) === prevPeriodKey : t.dateCompleted === prevPeriodKey))
+    : [];
+  const prevAccs = completedInPrevPeriod.map(ticketAccuracy).filter((a) => a !== null);
+  const prevAvgAcc = prevAccs.length ? Math.round(prevAccs.reduce((a, b) => a + b, 0) / prevAccs.length) : null;
+  const prevAvgRev = completedInPrevPeriod.length ? completedInPrevPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPrevPeriod.length : 0;
+  const prevTotalUnits = completedInPrevPeriod.reduce((s, t) => s + (t.units || 0), 0);
+  const pctChange = (curr, prev) => {
+    if (prevPeriodKey === null) return null;
+    if (!prev) return curr > 0 ? 100 : 0;
+    return Math.round(((curr - prev) / prev) * 100);
+  };
+  const trendLabel = periodType === "daily" ? "vs yesterday" : "vs last month";
+
   // Revision category analytics — every revision logged in the period,
   // across all tickets (not just completed ones), grouped by category.
   const revisionsInPeriod = tickets.flatMap((t) => t.revisions.map((r) => ({ ...r, ticketNo: t.ticketNo }))).filter((r) => inPeriod((r.date || "").slice(0, 10)));
@@ -2154,10 +2231,10 @@ function ReportsView({ tickets, roster }) {
 
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Requests logged" value={requestedInPeriod.length} icon={FilePlus2} />
-        <StatCard label="Completed" value={completedInPeriod.length} icon={CheckCircle2} />
-        <StatCard label="Units produced" value={orgTotalUnits} icon={Pencil} />
-        <StatCard label="Avg accuracy" value={orgAvgAcc ?? "—"} icon={BarChart3} />
-        <StatCard label="Avg revisions" value={orgAvgRev.toFixed(2)} icon={Pencil} />
+        <StatCard label="Completed" value={completedInPeriod.length} icon={CheckCircle2} trendPct={pctChange(completedInPeriod.length, completedInPrevPeriod.length)} trendLabel={trendLabel} />
+        <StatCard label="Units produced" value={orgTotalUnits} icon={Pencil} trendPct={pctChange(orgTotalUnits, prevTotalUnits)} trendLabel={trendLabel} />
+        <StatCard label="Avg accuracy" value={orgAvgAcc ?? "—"} icon={BarChart3} trendPct={pctChange(orgAvgAcc || 0, prevAvgAcc || 0)} trendLabel={trendLabel} />
+        <StatCard label="Avg revisions" value={orgAvgRev.toFixed(2)} icon={Pencil} trendPct={pctChange(orgAvgRev, prevAvgRev)} trendLabel={trendLabel} invertTrend />
         <StatCard label="Open priority items" value={tickets.filter((t) => t.status !== "Completed" && (t.priority === "High" || t.priority === "Urgent")).length} icon={Flag} />
       </div>
 
