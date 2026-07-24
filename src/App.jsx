@@ -315,6 +315,7 @@ export default function CreativeOpsApp() {
   const [openTicketId, setOpenTicketId] = useState(null);
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
+  const [appTagline, setAppTagline] = useState("");
 
   useEffect(() => {
     const link = document.getElementById("app-favicon");
@@ -344,6 +345,7 @@ export default function CreativeOpsApp() {
     let unsubTickets = null;
     let unsubWallpaper = null;
     let unsubLogo = null;
+    let unsubTagline = null;
     let unsubAnnouncements = null;
     let unsubReminders = null;
     let unsubEndorsements = null;
@@ -382,6 +384,7 @@ export default function CreativeOpsApp() {
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
       unsubWallpaper = storage.subscribe("wallpaper_image", true, (val) => setWallpaperUrl(val || null));
       unsubLogo = storage.subscribe("app_logo", true, (val) => setLogoUrl(val || null));
+      unsubTagline = storage.subscribe("app_tagline", true, (val) => setAppTagline(val || ""));
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
       unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
@@ -394,6 +397,7 @@ export default function CreativeOpsApp() {
       if (unsubTickets) unsubTickets();
       if (unsubWallpaper) unsubWallpaper();
       if (unsubLogo) unsubLogo();
+      if (unsubTagline) unsubTagline();
       if (unsubAnnouncements) unsubAnnouncements();
       if (unsubReminders) unsubReminders();
       if (unsubEndorsements) unsubEndorsements();
@@ -430,6 +434,10 @@ export default function CreativeOpsApp() {
   const clearLogo = async () => {
     setLogoUrl(null);
     try { if (storage.remove) await storage.remove("app_logo", true); } catch (e) {}
+  };
+  const saveTagline = async (text) => {
+    setAppTagline(text);
+    try { await storage.set("app_tagline", text, true); } catch (e) {}
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
@@ -636,6 +644,7 @@ export default function CreativeOpsApp() {
         onOpen={setOpenTicketId}
         setView={setView}
         logoUrl={logoUrl}
+        appTagline={appTagline}
       />
       <TabBar view={view} setView={setView} />
       <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto">
@@ -681,6 +690,8 @@ export default function CreativeOpsApp() {
             logoUrl={logoUrl}
             saveLogo={saveLogo}
             clearLogo={clearLogo}
+            appTagline={appTagline}
+            saveTagline={saveTagline}
             exportBackup={exportBackup}
             restoreBackup={restoreBackup}
           />
@@ -715,7 +726,7 @@ function FontStyles() {
   );
 }
 
-function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView, logoUrl }) {
+function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView, logoUrl, appTagline }) {
   return (
     <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
@@ -723,7 +734,7 @@ function Header({ authUser, isAdmin, tickets, announcements, endorsements, curre
           {logoUrl && <img src={logoUrl} alt="logo" className="h-10 w-10 object-contain rounded" />}
           <div>
             <div className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-              IPASS · Creative Production
+              {appTagline || "IPASS · Creative Production"}
             </div>
             <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
           </div>
@@ -2415,6 +2426,8 @@ function TeamHub(props) {
           logoUrl={props.logoUrl}
           saveLogo={props.saveLogo}
           clearLogo={props.clearLogo}
+          appTagline={props.appTagline}
+          saveTagline={props.saveTagline}
           exportBackup={props.exportBackup}
           restoreBackup={props.restoreBackup}
           isLead={props.isLead}
@@ -2757,12 +2770,15 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   );
 }
 
-function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, logoUrl, saveLogo, clearLogo, exportBackup, restoreBackup, isAdmin }) {
+function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, logoUrl, saveLogo, clearLogo, appTagline, saveTagline, exportBackup, restoreBackup, isAdmin }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("Requester");
   const [dept, setDept] = useState("Other");
   const [uploadingId, setUploadingId] = useState(null);
+  const [taglineInput, setTaglineInput] = useState(appTagline || "");
+
+  useEffect(() => { setTaglineInput(appTagline || ""); }, [appTagline]);
 
   const add = (e) => {
     e.preventDefault();
@@ -2802,8 +2818,9 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
     <div className="space-y-5">
       {isAdmin && (
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>App logo (Admin)</SectionTitle>
+          <SectionTitle>App branding (Admin)</SectionTitle>
           <div className="mt-3">
+            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Logo</div>
             <input type="file" accept="image/*" onChange={(e) => handleLogo(e.target.files?.[0])} className="text-sm" />
             {logoUrl && (
               <div className="mt-2 flex items-center gap-2">
@@ -2812,6 +2829,14 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
               </div>
             )}
             <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Shows next to "Job Docket" in the header, for everyone. A square image works best.</div>
+          </div>
+          <div className="mt-4">
+            <div className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Header tagline</div>
+            <div className="flex gap-2">
+              <input value={taglineInput} onChange={(e) => setTaglineInput(e.target.value)} placeholder="IPASS · Creative Production" className="flex-1 border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+              <button onClick={() => saveTagline(taglineInput)} className="px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Save</button>
+            </div>
+            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>The small uppercase line above "Job Docket" in the header, for everyone.</div>
           </div>
         </div>
       )}
