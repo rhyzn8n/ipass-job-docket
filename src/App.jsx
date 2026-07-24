@@ -9,16 +9,23 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
+
+// ── ADMIN LOCK ──────────────────────────────────────────────────────
+// Only the login email(s) listed here are ever treated as Admin. This is a
+// code-level lock: Admin cannot be granted to anyone through the app UI —
+// only by editing this list and redeploying. Add your own login email below.
+const ADMIN_EMAILS = ["ryemarketing20@gmail.com"];
+// ──────────────────────────────────────────────────────────────────
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
 const CLOSED_STATUSES = ["Completed", "Cancelled"];
 const PAUSED_STATUSES = ["On Hold", "Completed", "Cancelled"]; // excluded from overdue alerts
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 const DEPTS = ["Social Media", "SEO", "Other"];
-const ROLES = ["Requester", "Artist", "Team Lead", "Admin"];
+const ROLES = ["Requester", "Artist", "Team Lead"]; // Admin is not assignable here — see ADMIN_EMAILS above
 const CONTENT_TYPES = ["Static", "Video"];
 const PURPOSES = ["Ads", "YouTube", "TikTok", "Facebook/IG", "Website", "Other"];
 const REVISION_CATEGORIES = ["Typo/Text error", "Wrong color", "Wrong size/dimension", "Layout/alignment", "Wrong image/asset", "Branding inconsistency", "Content/copy change", "Other"];
@@ -211,11 +218,69 @@ function StatusPill({ status }) {
   return <span className={`px-2 py-0.5 text-[11px] font-semibold rounded ${map[status] || ""}`}>{status}</span>;
 }
 
+function LoginScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await loginWithEmail(email.trim(), password);
+    } catch (err) {
+      setError("Login failed — check your email and password, or contact your Admin.");
+    }
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="min-h-[600px] flex items-center justify-center" style={{ background: "var(--paper)", fontFamily: "var(--font-body)" }}>
+      <FontStyles />
+      <form onSubmit={submit} className="bg-white border rounded-md p-6 w-full max-w-sm" style={{ borderColor: "var(--line)" }}>
+        <div className="text-[11px] uppercase tracking-[0.3em] mb-1" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>IPASS · Creative Production</div>
+        <h1 className="text-2xl font-black mb-4" style={{ fontFamily: "var(--font-display)" }}>Sign in to Job Docket</h1>
+        <Field label="Email">
+          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
+        </Field>
+        <div className="h-3" />
+        <Field label="Password">
+          <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }} />
+        </Field>
+        {error && <div className="text-xs mt-3" style={{ color: "var(--coral)" }}>{error}</div>}
+        <button type="submit" disabled={submitting} className="mt-4 w-full py-2 rounded text-white text-sm font-semibold disabled:opacity-50" style={{ background: "var(--ink)" }}>
+          {submitting ? "Signing in…" : "Sign in"}
+        </button>
+        <div className="text-[11px] mt-3" style={{ color: "var(--muted)" }}>No account? Your Admin creates accounts — ask them to add you.</div>
+      </form>
+    </div>
+  );
+}
+
+function NoProfileScreen({ email }) {
+  return (
+    <div className="min-h-[600px] flex items-center justify-center" style={{ background: "var(--paper)", fontFamily: "var(--font-body)" }}>
+      <FontStyles />
+      <div className="bg-white border rounded-md p-6 w-full max-w-sm text-center" style={{ borderColor: "var(--line)" }}>
+        <h1 className="text-xl font-black mb-2" style={{ fontFamily: "var(--font-display)" }}>No linked profile yet</h1>
+        <p className="text-sm mb-4" style={{ color: "var(--muted)" }}>
+          You're signed in as <b>{email}</b>, but no team profile has this email set yet. Ask your Admin to add you in Team Space → Roster & Settings, with this exact email.
+        </p>
+        <button onClick={logout} className="px-4 py-2 rounded text-sm font-semibold border" style={{ borderColor: "var(--line)" }}>Sign out</button>
+      </div>
+    </div>
+  );
+}
+
 export default function CreativeOpsApp() {
+  const [authUser, setAuthUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const [roster, setRoster] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [ticketSeq, setTicketSeq] = useState(0);
-  const [currentUserId, setCurrentUserId] = useState("");
   const [view, setView] = useState("dashboard");
   const [ready, setReady] = useState(false);
   const [openTicketId, setOpenTicketId] = useState(null);
@@ -228,6 +293,18 @@ export default function CreativeOpsApp() {
   const [galleryItems, setGalleryItems] = useState([]);
 
   useEffect(() => {
+    const unsub = subscribeAuth((u) => {
+      setAuthUser(u);
+      setAuthLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) {
+      setReady(false);
+      return;
+    }
     let unsubRoster = null;
     let unsubTickets = null;
     let unsubWallpaper = null;
@@ -236,7 +313,6 @@ export default function CreativeOpsApp() {
     let unsubEndorsements = null;
     let unsubChat = null;
     let unsubGallery = null;
-    let lastKnownUserId = "";
     let migrationAttempted = false;
 
     (async () => {
@@ -246,11 +322,6 @@ export default function CreativeOpsApp() {
         if (res && res.value) seq = JSON.parse(res.value);
       } catch (e) {}
       setTicketSeq(seq);
-
-      try {
-        const res = await storage.get("current_user", false);
-        if (res && res.value) lastKnownUserId = res.value;
-      } catch (e) {}
 
       unsubRoster = rosterApi.subscribe(async (list) => {
         if (list.length === 0 && !migrationAttempted) {
@@ -270,7 +341,6 @@ export default function CreativeOpsApp() {
           return;
         }
         setRoster(list);
-        setCurrentUserId((prev) => prev || (lastKnownUserId && list.find((m) => m.id === lastKnownUserId) ? lastKnownUserId : list[0]?.id) || "");
         setReady(true);
       });
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
@@ -292,7 +362,7 @@ export default function CreativeOpsApp() {
       if (unsubChat) unsubChat();
       if (unsubGallery) unsubGallery();
     };
-  }, []);
+  }, [authUser]);
 
   const saveRoster = async (next) => {
     const previousIds = new Set(roster.map((m) => m.id));
@@ -319,13 +389,13 @@ export default function CreativeOpsApp() {
     setTicketSeq(next);
     try { await storage.set("ticket_seq", JSON.stringify(next), true); } catch (e) {}
   };
-  const pickUser = async (id) => {
-    setCurrentUserId(id);
-    try { await storage.set("current_user", id, false); } catch (e) {}
-  };
 
-  const currentUser = roster.find((m) => m.id === currentUserId);
-  const isLead = currentUser?.role === "Team Lead" || currentUser?.role === "Admin";
+  // Identity is now the logged-in account, not a free-pick dropdown: your
+  // profile is whichever roster member has a matching email. Admin status is
+  // a fixed code-level list (ADMIN_EMAILS above) — never editable in the UI.
+  const isAdmin = !!authUser?.email && ADMIN_EMAILS.map((e) => e.toLowerCase()).includes(authUser.email.toLowerCase());
+  const currentUser = roster.find((m) => m.email && authUser?.email && m.email.toLowerCase() === authUser.email.toLowerCase());
+  const isLead = isAdmin || currentUser?.role === "Team Lead";
 
   const postAnnouncement = async (text) => {
     if (!text.trim()) return;
@@ -353,7 +423,7 @@ export default function CreativeOpsApp() {
 
   const addEndorsement = async (toMemberId, message) => {
     if (!message.trim()) return;
-    const next = [{ id: uid(), toMemberId, fromName: currentUser?.name || "Unknown", message, date: new Date().toISOString() }, ...endorsements];
+    const next = [{ id: uid(), toMemberId, fromId: currentUser?.id || null, fromName: currentUser?.name || "Unknown", message, date: new Date().toISOString() }, ...endorsements];
     setEndorsements(next);
     try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
   };
@@ -475,12 +545,28 @@ export default function CreativeOpsApp() {
 
   const openTicket = tickets.find((t) => t.id === openTicketId);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-[400px] flex items-center justify-center text-[var(--muted)]" style={{ fontFamily: "var(--font-mono)" }}>
+        checking session…
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <LoginScreen />;
+  }
+
   if (!ready) {
     return (
       <div className="min-h-[400px] flex items-center justify-center text-[var(--muted)]" style={{ fontFamily: "var(--font-mono)" }}>
         loading docket…
       </div>
     );
+  }
+
+  if (!currentUser && !isAdmin) {
+    return <NoProfileScreen email={authUser.email} />;
   }
 
   const outerStyle = {
@@ -495,11 +581,11 @@ export default function CreativeOpsApp() {
     <div style={outerStyle} className="min-h-[600px] w-full">
       <FontStyles />
       <Header
-        roster={roster}
-        currentUserId={currentUserId}
-        pickUser={pickUser}
+        authUser={authUser}
+        isAdmin={isAdmin}
         tickets={tickets}
         announcements={announcements}
+        endorsements={endorsements}
         currentUser={currentUser}
         onOpen={setOpenTicketId}
         setView={setView}
@@ -530,6 +616,7 @@ export default function CreativeOpsApp() {
             roster={roster}
             currentUser={currentUser}
             isLead={isLead}
+            isAdmin={isAdmin}
             endorsements={endorsements}
             addEndorsement={addEndorsement}
             deleteEndorsement={deleteEndorsement}
@@ -578,7 +665,7 @@ function FontStyles() {
   );
 }
 
-function Header({ roster, currentUserId, pickUser, tickets, announcements, currentUser, onOpen, setView }) {
+function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView }) {
   return (
     <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
@@ -589,21 +676,22 @@ function Header({ roster, currentUserId, pickUser, tickets, announcements, curre
           <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
         </div>
         <div className="flex items-center gap-3">
-          <NotificationBell tickets={tickets} announcements={announcements} currentUser={currentUser} onOpen={onOpen} setView={setView} />
-          <label className="text-sm flex items-center gap-2" style={{ color: "var(--muted)" }}>
+          <NotificationBell tickets={tickets} announcements={announcements} endorsements={endorsements} currentUser={currentUser} onOpen={onOpen} setView={setView} />
+          <div className="flex items-center gap-2 text-sm" style={{ color: "var(--muted)" }}>
             <Avatar member={currentUser} size={26} />
-            Acting as
-            <select value={currentUserId} onChange={(e) => pickUser(e.target.value)} className="border rounded px-2 py-1 text-sm bg-white" style={{ borderColor: "var(--line)", fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
-              {roster.map((m) => <option key={m.id} value={m.id}>{m.name} — {m.role}</option>)}
-            </select>
-          </label>
+            <div>
+              <div className="font-semibold" style={{ color: "var(--ink)" }}>{currentUser?.name || authUser?.email}</div>
+              <div className="text-[11px]">{isAdmin ? "Admin" : currentUser?.role}</div>
+            </div>
+            <button onClick={logout} title="Sign out" className="ml-2 px-2 py-1 rounded border text-xs font-semibold" style={{ borderColor: "var(--line)" }}>Sign out</button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function NotificationBell({ tickets, announcements, currentUser, onOpen, setView }) {
+function NotificationBell({ tickets, announcements, endorsements, currentUser, onOpen, setView }) {
   const [open, setOpen] = useState(false);
   const [lastSeen, setLastSeen] = useState(null);
   const [loadedSeen, setLoadedSeen] = useState(false);
@@ -625,8 +713,11 @@ function NotificationBell({ tickets, announcements, currentUser, onOpen, setView
       .filter((t) => t.assignedTo === currentUser.id || t.requestedBy === currentUser.id)
       .flatMap((t) => t.history.map((h) => ({ date: h.date, text: `${h.action} — JOB-${String(t.ticketNo).padStart(4, "0")}`, ticketId: t.id })));
     const fromAnnouncements = announcements.map((a) => ({ date: a.date, text: `Announcement: ${a.text}`, ticketId: null }));
-    return [...fromTickets, ...fromAnnouncements].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
-  }, [tickets, announcements, currentUser]);
+    const fromEndorsements = (endorsements || [])
+      .filter((e) => e.toMemberId === currentUser.id)
+      .map((e) => ({ date: e.date, text: `New message from ${e.fromName}`, ticketId: null, isPrivateMessage: true }));
+    return [...fromTickets, ...fromAnnouncements, ...fromEndorsements].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+  }, [tickets, announcements, endorsements, currentUser]);
 
   const unreadCount = loadedSeen ? items.filter((i) => new Date(i.date) > lastSeen).length : 0;
 
@@ -639,6 +730,7 @@ function NotificationBell({ tickets, announcements, currentUser, onOpen, setView
   const handleItemClick = (item) => {
     setOpen(false);
     if (item.ticketId) onOpen(item.ticketId);
+    else if (item.isPrivateMessage) setView("teamspace");
     else setView("dashboard");
   };
 
@@ -2147,6 +2239,7 @@ function TeamHub(props) {
           roster={props.roster}
           currentUser={props.currentUser}
           isLead={props.isLead}
+          isAdmin={props.isAdmin}
           endorsements={props.endorsements}
           addEndorsement={props.addEndorsement}
           deleteEndorsement={props.deleteEndorsement}
@@ -2177,13 +2270,14 @@ function TeamHub(props) {
           exportBackup={props.exportBackup}
           restoreBackup={props.restoreBackup}
           isLead={props.isLead}
+          isAdmin={props.isAdmin}
         />
       )}
     </div>
   );
 }
 
-function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem }) {
+function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem }) {
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
@@ -2193,8 +2287,14 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
-  const canEdit = isSelf || isLead;
-  const mine = endorsements.filter((e) => e.toMemberId === selected?.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const canEdit = isSelf || isAdmin;
+  // Private by design: a message only shows to the person it was sent to,
+  // the person who sent it, or Admin. Nobody else sees it — even when
+  // browsing someone else's profile.
+  const mine = endorsements
+    .filter((e) => e.toMemberId === selected?.id)
+    .filter((e) => isAdmin || e.toMemberId === currentUser?.id || e.fromId === currentUser?.id)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
 
   useEffect(() => {
     if (selected) {
@@ -2311,7 +2411,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
 
             {canEdit && !editingBio && (
               <button onClick={() => setEditingBio(true)} className="flex items-center gap-1 text-xs font-semibold mb-3" style={{ color: "var(--teal)" }}>
-                <Pencil size={12} /> {isSelf ? "Edit my profile" : `Edit ${selected.name}'s profile (Team Lead)`}
+                <Pencil size={12} /> {isSelf ? "Edit my profile" : `Edit ${selected.name}'s profile (Admin)`}
               </button>
             )}
 
@@ -2426,11 +2526,12 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Endorsements & messages</SectionTitle>
+          <SectionTitle>Private messages & endorsements</SectionTitle>
+          <div className="text-[11px] mb-2" style={{ color: "var(--muted)" }}>Visible only to {selected.name} and Admin — not the rest of the team.</div>
           {!isSelf && (
             <div className="flex gap-2 mt-2">
-              <input value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Leave a message for ${selected.name}…`} className="flex-1 border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
-              <button onClick={submitMessage} className="px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Post</button>
+              <input value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Leave a private message for ${selected.name}…`} className="flex-1 border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} />
+              <button onClick={submitMessage} className="px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>Send</button>
             </div>
           )}
           <div className="mt-3 space-y-2">
@@ -2441,7 +2542,7 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
                   {e.message}
                   <div className="text-[11px]" style={{ color: "var(--muted)" }}>— {e.fromName}, {new Date(e.date).toLocaleDateString()}</div>
                 </div>
-                {(isSelf || e.fromName === currentUser?.name) && <button onClick={() => deleteEndorsement(e.id)}><X size={13} color="var(--muted)" /></button>}
+                {(isSelf || e.fromId === currentUser?.id || isAdmin) && <button onClick={() => deleteEndorsement(e.id)}><X size={13} color="var(--muted)" /></button>}
               </div>
             ))}
           </div>
@@ -2460,8 +2561,9 @@ function TeamSpaceView({ roster, currentUser, isLead, endorsements, addEndorseme
   );
 }
 
-function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, exportBackup, restoreBackup, isLead }) {
+function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, exportBackup, restoreBackup, isAdmin }) {
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [role, setRole] = useState("Requester");
   const [dept, setDept] = useState("Other");
   const [uploadingId, setUploadingId] = useState(null);
@@ -2469,8 +2571,8 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
   const add = (e) => {
     e.preventDefault();
     if (!name.trim()) return;
-    saveRoster([...roster, { id: uid(), name, role, dept, hasPhoto: false }]);
-    setName("");
+    saveRoster([...roster, { id: uid(), name, email: email.trim(), role, dept, hasPhoto: false }]);
+    setName(""); setEmail("");
   };
   const update = (id, patch) => saveRoster(roster.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   const remove = (id) => saveRoster(roster.filter((m) => m.id !== id));
@@ -2517,7 +2619,7 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
           <button onClick={exportBackup} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-white text-xs font-semibold" style={{ background: "var(--ink)" }}>
             <Download size={13} /> Export backup (JSON)
           </button>
-          {isLead && (
+          {isAdmin && (
             <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
               <Upload size={13} /> Restore from backup
               <input type="file" accept=".json" className="hidden" onChange={(e) => restoreBackup(e.target.files?.[0])} />
@@ -2525,55 +2627,77 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
           )}
         </div>
         <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>
-          Includes all requests, the roster, announcements, and reminders. Team photos and inspiration images are not included in the backup file — save those separately if needed. {isLead ? "" : "Only a Team Lead/Admin can restore a backup."}
+          Includes all requests, the roster, announcements, and reminders. Team photos and inspiration images are not included in the backup file — save those separately if needed. {isAdmin ? "" : "Only Admin can restore a backup."}
         </div>
       </div>
 
-      <form onSubmit={add} className="bg-white border rounded-md p-4 flex flex-wrap gap-2 items-end" style={{ borderColor: "var(--line)" }}>
-        <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} /></Field>
-        <Field label="Role">
-          <select value={role} onChange={(e) => setRole(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
-            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-          </select>
-        </Field>
-        <Field label="Department">
-          <select value={dept} onChange={(e) => setDept(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
-            {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
-          </select>
-        </Field>
-        <button className="px-3 py-1.5 rounded text-white text-sm font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><Plus size={14} /> Add member</button>
-      </form>
+      {isAdmin && (
+        <form onSubmit={add} className="bg-white border rounded-md p-4 flex flex-wrap gap-2 items-end" style={{ borderColor: "var(--line)" }}>
+          <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} /></Field>
+          <Field label="Login email">
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }} placeholder="must match their Firebase account" />
+          </Field>
+          <Field label="Role">
+            <select value={role} onChange={(e) => setRole(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+              {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </Field>
+          <Field label="Department">
+            <select value={dept} onChange={(e) => setDept(e.target.value)} className="border rounded px-2 py-1.5 text-sm" style={{ borderColor: "var(--line)" }}>
+              {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </Field>
+          <button className="px-3 py-1.5 rounded text-white text-sm font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><Plus size={14} /> Add member</button>
+        </form>
+      )}
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Team roster</SectionTitle>
+        <SectionTitle>Team roster{!isAdmin && " (view only — Admin manages this)"}</SectionTitle>
         <table className="w-full text-sm mt-3">
           <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Photo</th><th className="pb-2">Name</th><th className="pb-2">Role</th><th className="pb-2">Dept</th><th className="pb-2"></th></tr>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}><th className="pb-2">Photo</th><th className="pb-2">Name</th><th className="pb-2">Login email</th><th className="pb-2">Role</th><th className="pb-2">Dept</th>{isAdmin && <th className="pb-2"></th>}</tr>
           </thead>
           <tbody>
             {roster.map((m) => (
               <tr key={m.id} className="border-t" style={{ borderColor: "var(--line)" }}>
                 <td className="py-1.5">
-                  <label className="cursor-pointer flex items-center gap-1.5">
+                  {isAdmin ? (
+                    <label className="cursor-pointer flex items-center gap-1.5">
+                      <Avatar member={m} size={32} />
+                      <input type="file" accept="image/*" className="hidden" onChange={(e) => handlePhoto(m.id, e.target.files?.[0])} />
+                      <Pencil size={11} color="var(--muted)" />
+                    </label>
+                  ) : (
                     <Avatar member={m} size={32} />
-                    <input type="file" accept="image/*" className="hidden" onChange={(e) => handlePhoto(m.id, e.target.files?.[0])} />
-                    <Pencil size={11} color="var(--muted)" />
-                  </label>
+                  )}
                   {uploadingId === m.id && <div className="text-[10px]" style={{ color: "var(--muted)" }}>uploading…</div>}
-                  {m.hasPhoto && <button onClick={() => handleRemovePhoto(m.id)} className="text-[10px]" style={{ color: "var(--coral)" }}>remove</button>}
-                </td>
-                <td className="py-1.5"><input value={m.name} onChange={(e) => update(m.id, { name: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} /></td>
-                <td className="py-1.5">
-                  <select value={m.role} onChange={(e) => update(m.id, { role: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
-                    {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  {isAdmin && m.hasPhoto && <button onClick={() => handleRemovePhoto(m.id)} className="text-[10px]" style={{ color: "var(--coral)" }}>remove</button>}
                 </td>
                 <td className="py-1.5">
-                  <select value={m.dept} onChange={(e) => update(m.id, { dept: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
-                    {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
-                  </select>
+                  {isAdmin ? (
+                    <input value={m.name} onChange={(e) => update(m.id, { name: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} />
+                  ) : m.name}
                 </td>
-                <td className="py-1.5 text-right"><button onClick={() => remove(m.id)}><Trash2 size={15} color="var(--coral)" /></button></td>
+                <td className="py-1.5">
+                  {isAdmin ? (
+                    <input type="email" value={m.email || ""} onChange={(e) => update(m.id, { email: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm w-full" style={{ borderColor: "var(--line)" }} />
+                  ) : (m.email || <span style={{ color: "var(--muted)" }}>—</span>)}
+                </td>
+                <td className="py-1.5">
+                  {isAdmin ? (
+                    <select value={m.role} onChange={(e) => update(m.id, { role: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                      {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  ) : m.role}
+                </td>
+                <td className="py-1.5">
+                  {isAdmin ? (
+                    <select value={m.dept} onChange={(e) => update(m.id, { dept: e.target.value })} className="border rounded px-1.5 py-0.5 text-sm" style={{ borderColor: "var(--line)" }}>
+                      {DEPTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  ) : m.dept}
+                </td>
+                {isAdmin && <td className="py-1.5 text-right"><button onClick={() => remove(m.id)}><Trash2 size={15} color="var(--coral)" /></button></td>}
               </tr>
             ))}
           </tbody>
