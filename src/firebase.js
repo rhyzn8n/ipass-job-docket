@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot } from "firebase/firestore";
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────
 // Get this from: Firebase Console → Project Settings → Your apps → SDK setup and configuration
@@ -15,10 +16,26 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+export const auth = getAuth(app);
 
-// Gives every browser a stable anonymous id for "personal" (non-shared) data,
-// e.g. which team member you last selected as "Acting as".
+// Real login gate: nobody reaches the app without a valid account.
+// Firebase persists the session in the browser automatically, so people
+// stay signed in across visits until they explicitly log out.
+export function subscribeAuth(callback) {
+  return onAuthStateChanged(auth, callback);
+}
+export async function loginWithEmail(email, password) {
+  return signInWithEmailAndPassword(auth, email, password);
+}
+export async function logout() {
+  return signOut(auth);
+}
+
+// Gives every user a stable id for "personal" (non-shared) data, e.g. which
+// notifications they've already seen. Uses their real signed-in account id
+// once logged in; falls back to a browser-local id only before that.
 function getLocalUserId() {
+  if (auth.currentUser?.uid) return auth.currentUser.uid;
   let id = localStorage.getItem("docket_local_id");
   if (!id) {
     id = "u_" + Math.random().toString(36).slice(2, 10);
