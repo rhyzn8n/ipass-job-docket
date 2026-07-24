@@ -17,7 +17,7 @@ import html2canvas from "html2canvas";
 // Only the login email(s) listed here are ever treated as Admin. This is a
 // code-level lock: Admin cannot be granted to anyone through the app UI —
 // only by editing this list and redeploying. Add your own login email below.
-const ADMIN_EMAILS = ["YOUR_ADMIN_EMAIL@example.com"];
+const ADMIN_EMAILS = ["ryemarketing20@gmail.com"];
 // ──────────────────────────────────────────────────────────────────
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
