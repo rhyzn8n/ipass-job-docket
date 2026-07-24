@@ -17,7 +17,7 @@ import html2canvas from "html2canvas";
 // Only the login email(s) listed here are ever treated as Admin. This is a
 // code-level lock: Admin cannot be granted to anyone through the app UI —
 // only by editing this list and redeploying. Add your own login email below.
-const ADMIN_EMAILS = ["ryemarketing20@gmail.com"];
+const ADMIN_EMAILS = ["YOUR_ADMIN_EMAIL@example.com"];
 // ──────────────────────────────────────────────────────────────────
 
 const STATUSES = ["New", "Assigned", "In Progress", "In Revision", "On Hold", "Review", "Completed", "Cancelled"];
@@ -285,6 +285,7 @@ export default function CreativeOpsApp() {
   const [ready, setReady] = useState(false);
   const [openTicketId, setOpenTicketId] = useState(null);
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
+  const [logoUrl, setLogoUrl] = useState(null);
 
   const [announcements, setAnnouncements] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -308,6 +309,7 @@ export default function CreativeOpsApp() {
     let unsubRoster = null;
     let unsubTickets = null;
     let unsubWallpaper = null;
+    let unsubLogo = null;
     let unsubAnnouncements = null;
     let unsubReminders = null;
     let unsubEndorsements = null;
@@ -345,6 +347,7 @@ export default function CreativeOpsApp() {
       });
       unsubTickets = ticketsApi.subscribe((list) => setTickets(list));
       unsubWallpaper = storage.subscribe("wallpaper_image", true, (val) => setWallpaperUrl(val || null));
+      unsubLogo = storage.subscribe("app_logo", true, (val) => setLogoUrl(val || null));
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
       unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
@@ -356,6 +359,7 @@ export default function CreativeOpsApp() {
       if (unsubRoster) unsubRoster();
       if (unsubTickets) unsubTickets();
       if (unsubWallpaper) unsubWallpaper();
+      if (unsubLogo) unsubLogo();
       if (unsubAnnouncements) unsubAnnouncements();
       if (unsubReminders) unsubReminders();
       if (unsubEndorsements) unsubEndorsements();
@@ -384,6 +388,14 @@ export default function CreativeOpsApp() {
   const clearWallpaper = async () => {
     setWallpaperUrl(null);
     try { if (storage.remove) await storage.remove("wallpaper_image", true); } catch (e) {}
+  };
+  const saveLogo = async (dataUrl) => {
+    setLogoUrl(dataUrl);
+    try { await storage.set("app_logo", dataUrl, true); } catch (e) {}
+  };
+  const clearLogo = async () => {
+    setLogoUrl(null);
+    try { if (storage.remove) await storage.remove("app_logo", true); } catch (e) {}
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
@@ -589,6 +601,7 @@ export default function CreativeOpsApp() {
         currentUser={currentUser}
         onOpen={setOpenTicketId}
         setView={setView}
+        logoUrl={logoUrl}
       />
       <TabBar view={view} setView={setView} />
       <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto">
@@ -631,6 +644,9 @@ export default function CreativeOpsApp() {
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
+            logoUrl={logoUrl}
+            saveLogo={saveLogo}
+            clearLogo={clearLogo}
             exportBackup={exportBackup}
             restoreBackup={restoreBackup}
           />
@@ -665,15 +681,18 @@ function FontStyles() {
   );
 }
 
-function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView }) {
+function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView, logoUrl }) {
   return (
     <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-            IPASS · Creative Production
+        <div className="flex items-center gap-3">
+          {logoUrl && <img src={logoUrl} alt="logo" className="h-10 w-10 object-contain rounded" />}
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+              IPASS · Creative Production
+            </div>
+            <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
           </div>
-          <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
         </div>
         <div className="flex items-center gap-3">
           <NotificationBell tickets={tickets} announcements={announcements} endorsements={endorsements} currentUser={currentUser} onOpen={onOpen} setView={setView} />
@@ -2267,6 +2286,9 @@ function TeamHub(props) {
           wallpaperUrl={props.wallpaperUrl}
           saveWallpaper={props.saveWallpaper}
           clearWallpaper={props.clearWallpaper}
+          logoUrl={props.logoUrl}
+          saveLogo={props.saveLogo}
+          clearLogo={props.clearLogo}
           exportBackup={props.exportBackup}
           restoreBackup={props.restoreBackup}
           isLead={props.isLead}
@@ -2561,7 +2583,7 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   );
 }
 
-function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, exportBackup, restoreBackup, isAdmin }) {
+function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, logoUrl, saveLogo, clearLogo, exportBackup, restoreBackup, isAdmin }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("Requester");
@@ -2596,8 +2618,30 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
     await saveWallpaper(compressed);
   };
 
+  const handleLogo = async (file) => {
+    if (!file) return;
+    const compressed = await compressImage(file, 300, 0.9);
+    await saveLogo(compressed);
+  };
+
   return (
     <div className="space-y-5">
+      {isAdmin && (
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>App logo (Admin)</SectionTitle>
+          <div className="mt-3">
+            <input type="file" accept="image/*" onChange={(e) => handleLogo(e.target.files?.[0])} className="text-sm" />
+            {logoUrl && (
+              <div className="mt-2 flex items-center gap-2">
+                <img src={logoUrl} alt="logo preview" className="h-12 w-12 object-contain rounded border" style={{ borderColor: "var(--line)" }} />
+                <button onClick={clearLogo} className="text-xs font-semibold px-2 py-1 rounded border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Remove logo</button>
+              </div>
+            )}
+            <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Shows next to "Job Docket" in the header, for everyone. A square image works best.</div>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
         <SectionTitle>Appearance</SectionTitle>
         <div className="mt-3">
