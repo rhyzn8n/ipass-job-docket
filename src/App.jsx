@@ -26,7 +26,21 @@ const PAUSED_STATUSES = ["On Hold", "Completed", "Cancelled"]; // excluded from 
 const PRIORITIES = ["Low", "Normal", "High", "Urgent"];
 const DEPTS = ["Social Media", "SEO", "Other"];
 const ROLES = ["Requester", "Artist", "Team Lead"]; // Admin is not assignable here — see ADMIN_EMAILS above
-const CONTENT_TYPES = ["Static", "Video"];
+const CONTENT_TYPES = [
+  "Static – Social Media",
+  "Static – Website/Landing Page",
+  "Static – Ads/Promotional",
+  "Static – Email/Newsletter",
+  "Video – Reels/Shorts",
+  "Video – Promotional/Ads",
+  "Video – Webinar/Long-form",
+  "Video – Testimonial/Interview",
+];
+// Buckets any content type into Static/Video — handles old tickets that just
+// say "Static" or "Video" (pre-detailed-category) as well as the new list.
+function contentSuperType(ct) {
+  return (ct || "").startsWith("Video") ? "Video" : "Static";
+}
 const PURPOSES = ["Ads", "YouTube", "TikTok", "Facebook/IG", "Website", "Other"];
 const REVISION_CATEGORIES = ["Typo/Text error", "Wrong color", "Wrong size/dimension", "Layout/alignment", "Wrong image/asset", "Branding inconsistency", "Content/copy change", "Other"];
 
@@ -1163,6 +1177,23 @@ function SectionTitle({ children }) {
   return <div className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--muted)" }}>{children}</div>;
 }
 
+function ChartTypeToggle({ value, onChange, options }) {
+  return (
+    <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
+      {options.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onChange(o.id)}
+          className="px-2 py-0.5 text-[11px] font-semibold"
+          style={{ background: value === o.id ? "var(--ink)" : "white", color: value === o.id ? "white" : "var(--muted)" }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function EmptyState({ text }) {
   return <div className="text-sm py-6 text-center" style={{ color: "var(--muted)" }}>{text}</div>;
 }
@@ -1172,7 +1203,7 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
   const [description, setDescription] = useState("");
   const [requesterNotes, setRequesterNotes] = useState("");
   const [dept, setDept] = useState(currentUser?.dept || "Social Media");
-  const [contentType, setContentType] = useState("Static");
+  const [contentType, setContentType] = useState(CONTENT_TYPES[0]);
   const [purposes, setPurposes] = useState(["Ads"]);
   const [requestedBy, setRequestedBy] = useState(currentUser?.id || "");
   const [assignedTo, setAssignedTo] = useState("");
@@ -1449,7 +1480,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const [eDesc, setEDesc] = useState(ticket.description);
   const [eNotes, setENotes] = useState(ticket.requesterNotes || "");
   const [eDept, setEDept] = useState(ticket.dept);
-  const [eContentType, setEContentType] = useState(ticket.contentType || "Static");
+  const [eContentType, setEContentType] = useState(ticket.contentType || CONTENT_TYPES[0]);
   const [ePurposes, setEPurposes] = useState(getPurposes(ticket));
   const [ePriority, setEPriority] = useState(ticket.priority);
   const [eDue, setEDue] = useState(ticket.dueDate || "");
@@ -1824,6 +1855,8 @@ function ReportsView({ tickets, roster }) {
   const [rangeStart, setRangeStart] = useState(todayISO());
   const [rangeEnd, setRangeEnd] = useState(todayISO());
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [purposeChartType, setPurposeChartType] = useState("pie"); // "pie" | "bar"
+  const [categoryChartType, setCategoryChartType] = useState("bar"); // "bar" | "pie"
 
   const inPeriod = (dateStr) => {
     if (!dateStr) return false;
@@ -1865,11 +1898,21 @@ function ReportsView({ tickets, roster }) {
     .map((row) => ({ ...row, total: row.minor + row.major }))
     .filter((row) => row.total > 0)
     .sort((a, b) => b.total - a.total);
+  const topRevisionCategory = revisionsByCategory[0] || null;
 
-  const staticCount = requestedInPeriod.filter((t) => t.contentType === "Static").length;
-  const videoCount = requestedInPeriod.filter((t) => t.contentType === "Video").length;
+  // Creative output by category — weighted by units produced (not just
+  // ticket count), so a project the lead marked as 3 units counts as 3
+  // toward its content type, matching the actual output volume.
+  const byCreativeCategory = CONTENT_TYPES
+    .map((c) => ({ name: c, units: completedInPeriod.filter((t) => t.contentType === c).reduce((s, t) => s + (t.units || 0), 0) }))
+    .filter((row) => row.units > 0)
+    .sort((a, b) => b.units - a.units);
+  const staticUnits = completedInPeriod.filter((t) => contentSuperType(t.contentType) === "Static").reduce((s, t) => s + (t.units || 0), 0);
+  const videoUnits = completedInPeriod.filter((t) => contentSuperType(t.contentType) === "Video").reduce((s, t) => s + (t.units || 0), 0);
+
   const purposeTagsInPeriod = requestedInPeriod.flatMap((t) => getPurposes(t));
   const byPurpose = PURPOSES.map((p) => ({ name: p, value: purposeTagsInPeriod.filter((x) => x === p).length })).filter((p) => p.value > 0);
+  const purposeTotal = byPurpose.reduce((s, p) => s + p.value, 0);
 
   const ongoingByArtist = roster
     .filter((m) => m.role === "Artist" || m.role === "Team Lead")
@@ -2153,6 +2196,10 @@ function ReportsView({ tickets, roster }) {
           <EmptyState text="No revisions logged in this period." />
         ) : (
           <>
+            <div className="grid grid-cols-2 gap-3 mt-3 mb-1">
+              <StatCard label="Trending category" value={topRevisionCategory ? topRevisionCategory.name : "—"} icon={Trophy} />
+              <StatCard label="Overall combined avg. revisions/project" value={orgAvgRev.toFixed(2)} icon={Pencil} />
+            </div>
             <ResponsiveContainer width="100%" height={Math.max(160, revisionsByCategory.length * 34)}>
               <BarChart data={revisionsByCategory} layout="vertical" margin={{ left: 20 }}>
                 <CartesianGrid stroke="var(--line)" horizontal={false} />
@@ -2187,22 +2234,62 @@ function ReportsView({ tickets, roster }) {
 
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Content type mix — {periodLabelReadable}</SectionTitle>
-          <div className="flex gap-4 mt-3">
-            <StatCard label="Static" value={staticCount} icon={ImageIcon} />
-            <StatCard label="Video" value={videoCount} icon={ImageIcon} />
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <SectionTitle>Creative output by category — {periodLabelReadable} (units)</SectionTitle>
+            <ChartTypeToggle value={categoryChartType} onChange={setCategoryChartType} options={[{ id: "bar", label: "Bar" }, { id: "pie", label: "Pie" }]} />
           </div>
+          <div className="flex gap-4 mt-3 mb-2">
+            <StatCard label="Static units" value={staticUnits} icon={ImageIcon} />
+            <StatCard label="Video units" value={videoUnits} icon={ImageIcon} />
+          </div>
+          {byCreativeCategory.length === 0 ? (
+            <EmptyState text="No completed units in this period yet." />
+          ) : categoryChartType === "bar" ? (
+            <ResponsiveContainer width="100%" height={Math.max(160, byCreativeCategory.length * 32)}>
+              <BarChart data={byCreativeCategory} layout="vertical" margin={{ left: 10, right: 20 }}>
+                <CartesianGrid stroke="var(--line)" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={170} />
+                <Tooltip />
+                <Bar dataKey="units" fill="var(--teal)" radius={[0, 3, 3, 0]} label={{ position: "right" }} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie data={byCreativeCategory} dataKey="units" nameKey="name" outerRadius={85} label={(e) => `${e.name}: ${e.units}`}>
+                  {byCreativeCategory.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
         </div>
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Requests by purpose — {periodLabelReadable}</SectionTitle>
-          {byPurpose.length === 0 ? <EmptyState text="No requests logged in this period." /> : (
-            <ResponsiveContainer width="100%" height={180}>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <SectionTitle>Requests by purpose — {periodLabelReadable} ({purposeTotal} total)</SectionTitle>
+            <ChartTypeToggle value={purposeChartType} onChange={setPurposeChartType} options={[{ id: "pie", label: "Pie" }, { id: "bar", label: "Bar" }]} />
+          </div>
+          {byPurpose.length === 0 ? (
+            <EmptyState text="No requests logged in this period." />
+          ) : purposeChartType === "pie" ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie data={byPurpose} dataKey="value" nameKey="name" outerRadius={80} label={(e) => `${e.name}: ${e.value}`}>
+                  {byPurpose.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                </Pie>
+                <Tooltip />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <ResponsiveContainer width="100%" height={200}>
               <BarChart data={byPurpose}>
                 <CartesianGrid stroke="var(--line)" vertical={false} />
                 <XAxis dataKey="name" tick={{ fontSize: 10 }} />
                 <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
                 <Tooltip />
-                <Bar dataKey="value" fill="var(--teal)" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="value" fill="var(--teal)" radius={[3, 3, 0, 0]} label={{ position: "top" }} />
               </BarChart>
             </ResponsiveContainer>
           )}
