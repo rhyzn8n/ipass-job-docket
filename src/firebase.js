@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────
 // Get this from: Firebase Console → Project Settings → Your apps → SDK setup and configuration
@@ -17,6 +18,25 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 export const auth = getAuth(app);
+const fbStorage = getStorage(app);
+
+// Real file hosting — for anything too large to live inside a Firestore
+// document (like a full-length song). Files are streamed, not text-encoded,
+// so there's no 1MB document ceiling and playback doesn't load the whole
+// file into memory at once the way a Firestore-stored data URL would.
+export async function uploadAudioFile(memberId, file) {
+  const path = `profile_audio/${memberId}`;
+  const ref = storageRef(fbStorage, path);
+  await uploadBytes(ref, file);
+  return getDownloadURL(ref);
+}
+export async function deleteAudioFile(memberId) {
+  try {
+    await deleteObject(storageRef(fbStorage, `profile_audio/${memberId}`));
+  } catch (e) {
+    // Fine if it was already missing.
+  }
+}
 
 // Real login gate: nobody reaches the app without a valid account.
 // Firebase persists the session in the browser automatically, so people
