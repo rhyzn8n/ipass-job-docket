@@ -51,6 +51,21 @@ const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (isoDate) => (isoDate ? isoDate.slice(0, 7) : "");
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
+// The single active track with the most likes — ties broken by whichever was
+// uploaded first. Used both to decide the extended-retention "featured"
+// track and to highlight it in the Music Corner UI.
+function mostLikedTrack(tracks) {
+  return tracks.reduce((best, t) => {
+    const count = (t.likes || []).length;
+    if (count === 0) return best;
+    if (!best) return t;
+    const bestCount = (best.likes || []).length;
+    if (count > bestCount) return t;
+    if (count === bestCount && new Date(t.date) < new Date(best.date)) return t;
+    return best;
+  }, null);
+}
+
 function revisionEquivalent(ticket) {
   const minor = ticket.revisions.filter((r) => r.type === "minor").length;
   const major = ticket.revisions.filter((r) => r.type === "major").length;
@@ -515,7 +530,7 @@ export default function CreativeOpsApp() {
     const trackId = uid();
     try {
       const audioUrl = await uploadMusicTrack(trackId, file);
-      await musicApi.upsert({ id: trackId, memberId, memberName, title: title || "", audioUrl, date: new Date().toISOString() });
+      await musicApi.upsert({ id: trackId, memberId, memberName, title: title || "", audioUrl, date: new Date().toISOString(), likes: [] });
       return { ok: true };
     } catch (e) {
       return { error: "Upload failed. Try again." };
@@ -525,15 +540,25 @@ export default function CreativeOpsApp() {
     await musicApi.remove(track.id);
     await deleteMusicTrackFile(track.id);
   };
+  const toggleMusicLike = async (track, memberId) => {
+    const likes = track.likes || [];
+    const nextLikes = likes.includes(memberId) ? likes.filter((id) => id !== memberId) : [...likes, memberId];
+    await musicApi.upsert({ ...track, likes: nextLikes });
+  };
 
   // Lazy auto-cleanup: runs whenever the relevant list changes (i.e. whenever
   // someone has that tab open), rather than needing a separate always-on
   // server — there's no backend process in this app to run a real cron job.
+  // The single most-liked active track gets a longer 2-week window instead
+  // of the usual 3 days — everything else keeps the normal short lifespan.
   const cleanedMusicIds = useRef(new Set());
   useEffect(() => {
-    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const topLiked = mostLikedTrack(musicTracks);
     for (const t of musicTracks) {
       if (cleanedMusicIds.current.has(t.id)) continue;
+      const isFeatured = topLiked && t.id === topLiked.id;
+      const retentionDays = isFeatured ? 14 : 3;
+      const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
       if (new Date(t.date).getTime() < cutoff) {
         cleanedMusicIds.current.add(t.id);
         removeMusicTrack(t);
@@ -743,6 +768,7 @@ export default function CreativeOpsApp() {
             musicTracks={musicTracks}
             addMusicTrack={addMusicTrack}
             removeMusicTrack={removeMusicTrack}
+            toggleMusicLike={toggleMusicLike}
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
@@ -2559,6 +2585,7 @@ function TeamHub(props) {
           isAdmin={props.isAdmin}
           addMusicTrack={props.addMusicTrack}
           removeMusicTrack={props.removeMusicTrack}
+          toggleMusicLike={props.toggleMusicLike}
         />
       )}
       {sub === "roster" && (
@@ -2867,7 +2894,7 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   );
 }
 
-function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, removeMusicTrack }) {
+function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, removeMusicTrack, toggleMusicLike }) {
   const [title, setTitle] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
@@ -2878,7 +2905,11 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
   const atLimit = mine.length >= LIMIT;
   const sorted = [...tracks].sort((a, b) => new Date(b.date) - new Date(a.date));
   const memberFor = (id) => roster.find((m) => m.id === id);
-  const daysLeft = (date) => Math.max(0, 3 - Math.floor((Date.now() - new Date(date).getTime()) / 86400000));
+  const topTrack = mostLikedTrack(tracks);
+  const daysLeft = (t) => {
+    const retentionDays = topTrack && t.id === topTrack.id ? 14 : 3;
+    return Math.max(0, retentionDays - Math.floor((Date.now() - new Date(t.date).getTime()) / 86400000));
+  };
 
   const handleUpload = async (file) => {
     if (!file || !currentUser) return;
@@ -2892,6 +2923,32 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
     setUploading(false);
   };
 
+  const TrackRow = ({ t, featured }) => {
+    const member = memberFor(t.memberId);
+    const canRemove = featured ? isAdmin : (isAdmin || t.memberId === currentUser?.id);
+    const liked = currentUser && (t.likes || []).includes(currentUser.id);
+    return (
+      <div className="bg-white border rounded-md p-3 flex items-center gap-3" style={{ borderColor: featured ? "var(--amber)" : "var(--line)" }}>
+        <Avatar member={member} size={32} />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold truncate flex items-center gap-1.5">
+            {featured && <Trophy size={13} color="var(--amber)" />}
+            {t.title || "Untitled track"}
+          </div>
+          <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+            added by {t.memberName} · {daysLeft(t)} day{daysLeft(t) === 1 ? "" : "s"} left{featured ? " (featured — extended)" : ""}
+          </div>
+          <audio controls src={t.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
+        </div>
+        <button onClick={() => currentUser && toggleMusicLike(t, currentUser.id)} disabled={!currentUser} className="flex flex-col items-center gap-0.5 flex-shrink-0">
+          <Heart size={16} fill={liked ? "var(--coral)" : "none"} color="var(--coral)" />
+          <span className="text-[10px]" style={{ color: "var(--muted)" }}>{(t.likes || []).length}</span>
+        </button>
+        {canRemove && <button onClick={() => removeMusicTrack(t)}><X size={14} color="var(--muted)" /></button>}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
@@ -2900,7 +2957,7 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
           <SectionTitle>Music Corner — a track from anyone, for everyone</SectionTitle>
         </div>
         <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-          Up to {LIMIT} tracks per person, {MAX_MB}MB each. Tracks disappear automatically after 3 days, or you can remove your own anytime.
+          Up to {LIMIT} tracks per person, {MAX_MB}MB each. Tracks disappear after 3 days — except the most-liked track, which stays for 2 weeks and can only be removed by Admin.
         </div>
         {currentUser ? (
           <div className="mt-3">
@@ -2926,29 +2983,26 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
         )}
       </div>
 
-      {sorted.length === 0 ? (
-        <EmptyState text="No tracks yet — be the first to add one." />
-      ) : (
-        <div className="space-y-2">
-          {sorted.map((t) => {
-            const member = memberFor(t.memberId);
-            const canRemove = isAdmin || t.memberId === currentUser?.id;
-            return (
-              <div key={t.id} className="bg-white border rounded-md p-3 flex items-center gap-3" style={{ borderColor: "var(--line)" }}>
-                <Avatar member={member} size={32} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold truncate">{t.title || "Untitled track"}</div>
-                  <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-                    added by {t.memberName} · {daysLeft(t.date)} day{daysLeft(t.date) === 1 ? "" : "s"} left
-                  </div>
-                  <audio controls src={t.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
-                </div>
-                {canRemove && <button onClick={() => removeMusicTrack(t)}><X size={14} color="var(--muted)" /></button>}
-              </div>
-            );
-          })}
+      {topTrack && (
+        <div>
+          <div className="flex items-center gap-1.5 mb-2">
+            <Trophy size={14} color="var(--amber)" />
+            <SectionTitle>Most liked right now</SectionTitle>
+          </div>
+          <TrackRow t={topTrack} featured />
         </div>
       )}
+
+      <div>
+        {topTrack && <SectionTitle>All tracks</SectionTitle>}
+        {sorted.length === 0 ? (
+          <EmptyState text="No tracks yet — be the first to add one." />
+        ) : (
+          <div className="space-y-2 mt-2">
+            {sorted.map((t) => <TrackRow key={t.id} t={t} featured={topTrack && t.id === topTrack.id} />)}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
