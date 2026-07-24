@@ -38,6 +38,26 @@ export async function deleteAudioFile(memberId) {
   }
 }
 
+// Chat images/GIFs go through Storage too, not Firestore — GIFs need their
+// original bytes preserved to keep animating, and this keeps chat message
+// documents small regardless of how many images get shared.
+export async function uploadChatAttachment(messageId, file) {
+  const ext = file.type === "image/gif" ? "gif" : "img";
+  const path = `chat_attachments/${messageId}.${ext}`;
+  const ref = storageRef(fbStorage, path);
+  await uploadBytes(ref, file);
+  return getDownloadURL(ref);
+}
+export async function deleteChatAttachment(url) {
+  if (!url) return;
+  try {
+    await deleteObject(storageRef(fbStorage, url));
+  } catch (e) {
+    // Fine if it was already missing — deleteObject also accepts a gs:// path,
+    // but callers here pass the stored download URL/path they uploaded with.
+  }
+}
+
 // Real login gate: nobody reaches the app without a valid account.
 // Firebase persists the session in the browser automatically, so people
 // stay signed in across visits until they explicitly log out.
