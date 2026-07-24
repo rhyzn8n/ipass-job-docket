@@ -3,13 +3,13 @@ import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
   MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
-  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, auth, subscribeAuth, loginWithEmail, logout, uploadAudioFile, deleteAudioFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -327,6 +327,7 @@ export default function CreativeOpsApp() {
   const [endorsements, setEndorsements] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
   const [galleryItems, setGalleryItems] = useState([]);
+  const [musicTracks, setMusicTracks] = useState([]);
 
   useEffect(() => {
     const unsub = subscribeAuth((u) => {
@@ -351,6 +352,7 @@ export default function CreativeOpsApp() {
     let unsubEndorsements = null;
     let unsubChat = null;
     let unsubGallery = null;
+    let unsubMusic = null;
     let migrationAttempted = false;
 
     (async () => {
@@ -390,6 +392,7 @@ export default function CreativeOpsApp() {
       unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
       unsubChat = chatApi.subscribe((list) => setChatMessages(list));
       unsubGallery = galleryApi.subscribe((list) => setGalleryItems(list));
+      unsubMusic = musicApi.subscribe((list) => setMusicTracks(list));
     })();
 
     return () => {
@@ -403,6 +406,7 @@ export default function CreativeOpsApp() {
       if (unsubEndorsements) unsubEndorsements();
       if (unsubChat) unsubChat();
       if (unsubGallery) unsubGallery();
+      if (unsubMusic) unsubMusic();
     };
   }, [authUser]);
 
@@ -503,6 +507,56 @@ export default function CreativeOpsApp() {
   const removeGalleryItem = async (id) => {
     await galleryApi.remove(id);
   };
+
+  const MUSIC_LIMIT_PER_MEMBER = 3;
+  const addMusicTrack = async (memberId, memberName, title, file) => {
+    const mine = musicTracks.filter((t) => t.memberId === memberId);
+    if (mine.length >= MUSIC_LIMIT_PER_MEMBER) return { error: `You've already got ${MUSIC_LIMIT_PER_MEMBER} tracks up — remove one first.` };
+    const trackId = uid();
+    try {
+      const audioUrl = await uploadMusicTrack(trackId, file);
+      await musicApi.upsert({ id: trackId, memberId, memberName, title: title || "", audioUrl, date: new Date().toISOString() });
+      return { ok: true };
+    } catch (e) {
+      return { error: "Upload failed. Try again." };
+    }
+  };
+  const removeMusicTrack = async (track) => {
+    await musicApi.remove(track.id);
+    await deleteMusicTrackFile(track.id);
+  };
+
+  // Lazy auto-cleanup: runs whenever the relevant list changes (i.e. whenever
+  // someone has that tab open), rather than needing a separate always-on
+  // server — there's no backend process in this app to run a real cron job.
+  const cleanedMusicIds = useRef(new Set());
+  useEffect(() => {
+    const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    for (const t of musicTracks) {
+      if (cleanedMusicIds.current.has(t.id)) continue;
+      if (new Date(t.date).getTime() < cutoff) {
+        cleanedMusicIds.current.add(t.id);
+        removeMusicTrack(t);
+      }
+    }
+  }, [musicTracks]);
+
+  const cleanedAttachmentIds = useRef(new Set());
+  useEffect(() => {
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    for (const m of chatMessages) {
+      if (!m.attachmentUrl || cleanedAttachmentIds.current.has(m.id)) continue;
+      if (new Date(m.date).getTime() < cutoff) {
+        cleanedAttachmentIds.current.add(m.id);
+        deleteChatAttachment(m.attachmentUrl);
+        if (m.text && m.text.trim()) {
+          chatApi.upsert({ ...m, attachmentUrl: null });
+        } else {
+          chatApi.remove(m.id);
+        }
+      }
+    }
+  }, [chatMessages]);
 
   const exportBackup = () => {
     const backup = {
@@ -686,6 +740,9 @@ export default function CreativeOpsApp() {
             chatMessages={chatMessages}
             sendChatMessage={sendChatMessage}
             deleteChatMessage={deleteChatMessage}
+            musicTracks={musicTracks}
+            addMusicTrack={addMusicTrack}
+            removeMusicTrack={removeMusicTrack}
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
@@ -2446,6 +2503,7 @@ function TeamHub(props) {
   const subtabs = [
     { id: "profiles", label: "Profiles", icon: Heart },
     { id: "chat", label: "Chat", icon: MessageSquarePlus },
+    { id: "music", label: "Music Corner", icon: Music },
     { id: "roster", label: "Roster & Settings", icon: Users },
   ];
   return (
@@ -2493,6 +2551,16 @@ function TeamHub(props) {
           deleteMessage={props.deleteChatMessage}
         />
       )}
+      {sub === "music" && (
+        <MusicCornerView
+          tracks={props.musicTracks}
+          roster={props.roster}
+          currentUser={props.currentUser}
+          isAdmin={props.isAdmin}
+          addMusicTrack={props.addMusicTrack}
+          removeMusicTrack={props.removeMusicTrack}
+        />
+      )}
       {sub === "roster" && (
         <TeamView
           roster={props.roster}
@@ -2522,9 +2590,6 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   const [profileWallpaper, setProfileWallpaper] = useState(null);
   const [pendingHasWallpaper, setPendingHasWallpaper] = useState(false);
   const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", favoriteMusic: "", wishlist: "", quote: "" });
-  const [pendingSongUrl, setPendingSongUrl] = useState(null);
-  const [uploadingAudio, setUploadingAudio] = useState(false);
-  const [audioError, setAudioError] = useState("");
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
@@ -2545,8 +2610,6 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
         wishlist: selected.wishlist || "", quote: selected.quote || "",
       });
       setPendingHasWallpaper(!!selected.hasProfileWallpaper);
-      setPendingSongUrl(selected.favoriteSongUrl || null);
-      setAudioError("");
       if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
       else setProfileWallpaper(null);
     }
@@ -2555,37 +2618,11 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
-  const MAX_AUDIO_MB = 15;
-  const handleAudioUpload = async (file) => {
-    if (!file || !selected) return;
-    setAudioError("");
-    if (!file.type.startsWith("audio/")) {
-      setAudioError("That doesn't look like an audio file.");
-      return;
-    }
-    if (file.size > MAX_AUDIO_MB * 1024 * 1024) {
-      setAudioError(`File is too large — keep it under ${MAX_AUDIO_MB}MB.`);
-      return;
-    }
-    setUploadingAudio(true);
-    try {
-      const url = await uploadAudioFile(selected.id, file);
-      setPendingSongUrl(url);
-    } catch (e) {
-      setAudioError("Upload failed. Check your connection and try again.");
-    }
-    setUploadingAudio(false);
-  };
-  const handleRemoveAudio = async () => {
-    await deleteAudioFile(selected.id);
-    setPendingSongUrl(null);
-  };
-
   // Wallpaper flag is saved together with the rest of the profile fields in
   // one write (not as a separate save call) so a photo upload followed
   // quickly by "Save" can never overwrite each other.
   const saveProfile = () => {
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper, favoriteSongUrl: pendingSongUrl } : m)));
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper } : m)));
     setEditingBio(false);
   };
 
@@ -2696,12 +2733,6 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
                   {selected.mobile && <div><b style={{ color: "var(--ink)" }}>Mobile:</b> {selected.mobile}</div>}
                   {selected.email && <div><b style={{ color: "var(--ink)" }}>Email:</b> {selected.email}</div>}
                 </div>
-                {selected.favoriteSongUrl && (
-                  <div className="pt-2">
-                    <div className="text-[11px] font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Favorite song</div>
-                    <audio controls src={selected.favoriteSongUrl} className="w-full" style={{ height: 32 }} />
-                  </div>
-                )}
               </div>
             ) : (
               <div className="space-y-3">
@@ -2709,17 +2740,6 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
                   <input type="file" accept="image/*" onChange={(e) => handleProfileWallpaper(e.target.files?.[0])} className="text-sm" />
                   {profileWallpaper && (
                     <button onClick={clearProfileWallpaper} className="ml-2 text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
-                  )}
-                </Field>
-                <Field label={`Favorite song, full audio (optional, up to ${MAX_AUDIO_MB}MB)`}>
-                  <input type="file" accept="audio/*" onChange={(e) => handleAudioUpload(e.target.files?.[0])} className="text-sm" />
-                  {uploadingAudio && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Uploading…</div>}
-                  {audioError && <div className="text-xs mt-1" style={{ color: "var(--coral)" }}>{audioError}</div>}
-                  {pendingSongUrl && !uploadingAudio && (
-                    <div className="mt-2 flex items-center gap-2">
-                      <audio controls src={pendingSongUrl} className="flex-1" style={{ height: 32 }} />
-                      <button onClick={handleRemoveAudio} className="text-xs font-semibold" style={{ color: "var(--coral)" }}>Remove</button>
-                    </div>
                   )}
                 </Field>
                 <Field label="Bio">
@@ -2841,6 +2861,88 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
             {lightbox.caption && <div className="text-white text-sm mt-2 text-center">{lightbox.caption}</div>}
             <button onClick={() => setLightbox(null)} className="mt-2 mx-auto flex items-center gap-1 text-white text-xs font-semibold"><X size={13} /> Close</button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, removeMusicTrack }) {
+  const [title, setTitle] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState("");
+  const MAX_MB = 15;
+  const LIMIT = 3;
+
+  const mine = tracks.filter((t) => t.memberId === currentUser?.id);
+  const atLimit = mine.length >= LIMIT;
+  const sorted = [...tracks].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const memberFor = (id) => roster.find((m) => m.id === id);
+  const daysLeft = (date) => Math.max(0, 3 - Math.floor((Date.now() - new Date(date).getTime()) / 86400000));
+
+  const handleUpload = async (file) => {
+    if (!file || !currentUser) return;
+    setError("");
+    if (!file.type.startsWith("audio/")) { setError("That doesn't look like an audio file."); return; }
+    if (file.size > MAX_MB * 1024 * 1024) { setError(`Keep it under ${MAX_MB}MB.`); return; }
+    setUploading(true);
+    const res = await addMusicTrack(currentUser.id, currentUser.name, title, file);
+    if (res?.error) setError(res.error);
+    else setTitle("");
+    setUploading(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <div className="flex items-center gap-1.5">
+          <Music size={14} color="var(--teal)" />
+          <SectionTitle>Music Corner — a track from anyone, for everyone</SectionTitle>
+        </div>
+        <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+          Up to {LIMIT} tracks per person, {MAX_MB}MB each. Tracks disappear automatically after 3 days, or you can remove your own anytime.
+        </div>
+        {currentUser && (
+          <div className="mt-3">
+            <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>Your slots: {mine.length}/{LIMIT}</div>
+            {atLimit ? (
+              <div className="text-xs" style={{ color: "var(--coral)" }}>You're at your limit — remove one of your tracks below to add another.</div>
+            ) : (
+              <div className="flex flex-wrap gap-2 items-center">
+                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Song title (optional)" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[140px]" style={{ borderColor: "var(--line)" }} />
+                <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
+                  <Upload size={13} /> Add track
+                  <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleUpload(e.target.files?.[0])} />
+                </label>
+              </div>
+            )}
+            {uploading && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Uploading…</div>}
+            {error && <div className="text-xs mt-1" style={{ color: "var(--coral)" }}>{error}</div>}
+          </div>
+        )}
+      </div>
+
+      {sorted.length === 0 ? (
+        <EmptyState text="No tracks yet — be the first to add one." />
+      ) : (
+        <div className="space-y-2">
+          {sorted.map((t) => {
+            const member = memberFor(t.memberId);
+            const canRemove = isAdmin || t.memberId === currentUser?.id;
+            return (
+              <div key={t.id} className="bg-white border rounded-md p-3 flex items-center gap-3" style={{ borderColor: "var(--line)" }}>
+                <Avatar member={member} size={32} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold truncate">{t.title || "Untitled track"}</div>
+                  <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+                    added by {t.memberName} · {daysLeft(t.date)} day{daysLeft(t.date) === 1 ? "" : "s"} left
+                  </div>
+                  <audio controls src={t.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
+                </div>
+                {canRemove && <button onClick={() => removeMusicTrack(t)}><X size={14} color="var(--muted)" /></button>}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
