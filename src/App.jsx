@@ -2902,7 +2902,7 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
         <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
           Up to {LIMIT} tracks per person, {MAX_MB}MB each. Tracks disappear automatically after 3 days, or you can remove your own anytime.
         </div>
-        {currentUser && (
+        {currentUser ? (
           <div className="mt-3">
             <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>Your slots: {mine.length}/{LIMIT}</div>
             {atLimit ? (
@@ -2918,6 +2918,10 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
             )}
             {uploading && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Uploading…</div>}
             {error && <div className="text-xs mt-1" style={{ color: "var(--coral)" }}>{error}</div>}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs" style={{ color: "var(--coral)" }}>
+            Your login isn't linked to a team profile yet, so you can't upload here. Go to Roster &amp; Settings and make sure a profile's "Login email" exactly matches the email you signed in with.
           </div>
         )}
       </div>
