@@ -146,3 +146,8 @@ export const rosterApi = makeCollectionApi("roster_v2");
 export const galleryApi = makeCollectionApi("profile_gallery");
 // Music Corner tracks — one document per uploaded song.
 export const musicApi = makeCollectionApi("music_corner_tracks");
+// Private messages — one document per message, with sender/recipient email
+// denormalized onto each doc, so Firestore rules can enforce privacy
+// directly (only sender, recipient, or Admin can read a given message) —
+// not just the app's own UI filtering.
+export const endorsementsApi = makeCollectionApi("endorsements_v2");
