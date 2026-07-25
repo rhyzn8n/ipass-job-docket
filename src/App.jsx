@@ -3,7 +3,7 @@ import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
   MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
-  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music, Play, Pause
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music, Play, Pause, Maximize2, Minimize2, SkipForward
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -68,6 +68,26 @@ function extractYouTubeId(url) {
     if (m) return m[1];
   }
   return null;
+}
+
+// A plain <iframe src="youtube.com/embed/..."> can't tell us when the video
+// ends — that needs the real YouTube Player API loaded and a player
+// instance we control, which is what makes autoplay-next possible.
+function ensureYouTubeApi() {
+  return new Promise((resolve) => {
+    if (window.YT && window.YT.Player) { resolve(); return; }
+    const prevCallback = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (prevCallback) prevCallback();
+      resolve();
+    };
+    if (!document.getElementById("youtube-iframe-api")) {
+      const tag = document.createElement("script");
+      tag.id = "youtube-iframe-api";
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.body.appendChild(tag);
+    }
+  });
 }
 
 function mostLikedTrack(tracks) {
@@ -583,6 +603,25 @@ export default function CreativeOpsApp() {
     const nextLikes = likes.includes(memberId) ? likes.filter((id) => id !== memberId) : [...likes, memberId];
     await musicApi.upsert({ ...track, likes: nextLikes });
   };
+  const playNextTrack = () => {
+    setNowPlaying((current) => {
+      if (!current) return current;
+      const queue = [...musicTracks].sort((a, b) => new Date(b.date) - new Date(a.date));
+      const idx = queue.findIndex((t) => t.id === current.id);
+      if (idx === -1 || queue.length === 0) return null;
+      return queue[(idx + 1) % queue.length];
+    });
+  };
+
+  // "What I'm working on right now" — a single ticket per person, self-
+  // managed. Auto-cleared whenever that ticket closes or gets reassigned,
+  // so the person has to consciously pick their next focus rather than
+  // the status silently pointing at something stale.
+  const setActiveTicket = async (memberId, ticketId) => {
+    const member = roster.find((m) => m.id === memberId);
+    if (!member) return;
+    await rosterApi.upsert({ ...member, activeTicketId: ticketId });
+  };
 
   // Lazy auto-cleanup: runs whenever the relevant list changes (i.e. whenever
   // someone has that tab open), rather than needing a separate always-on
@@ -712,6 +751,10 @@ export default function CreativeOpsApp() {
     const t = tickets.find((x) => x.id === id);
     await ticketsApi.remove(id);
     if (t?.hasImage) await removeInspoImage(id);
+    if (t?.assignedTo) {
+      const member = roster.find((m) => m.id === t.assignedTo);
+      if (member?.activeTicketId === id) await setActiveTicket(member.id, null);
+    }
     setOpenTicketId(null);
   };
 
@@ -822,7 +865,7 @@ export default function CreativeOpsApp() {
           />
         )}
       </main>
-      <NowPlayingBar track={nowPlaying} onClose={() => setNowPlaying(null)} />
+      <NowPlayingBar track={nowPlaying} onClose={() => setNowPlaying(null)} onEnded={playNextTrack} onSkip={playNextTrack} />
       {openTicket && (
         <TicketModal
           ticket={openTicket}
@@ -832,6 +875,7 @@ export default function CreativeOpsApp() {
           onClose={() => setOpenTicketId(null)}
           onUpdate={updateTicket}
           onDelete={deleteTicket}
+          setActiveTicket={setActiveTicket}
         />
       )}
     </div>
@@ -1494,8 +1538,35 @@ function BoardView({ tickets, roster, onOpen }) {
   const [filterAssignee, setFilterAssignee] = useState("");
   const [filterPriority, setFilterPriority] = useState("");
   const filtered = tickets.filter((t) => (!filterAssignee || t.assignedTo === filterAssignee) && (!filterPriority || t.priority === filterPriority));
+  const workers = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   return (
     <div>
+      <div className="bg-white border rounded-md p-4 mb-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Team status — who's working on what, live</SectionTitle>
+        <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 mt-3">
+          {workers.map((m) => {
+            const activeTicket = m.activeTicketId ? tickets.find((t) => t.id === m.activeTicketId && !CLOSED_STATUSES.includes(t.status)) : null;
+            return (
+              <button
+                key={m.id}
+                onClick={() => activeTicket && onOpen(activeTicket.id)}
+                disabled={!activeTicket}
+                className="text-left flex items-center gap-2 p-2 rounded border"
+                style={{ borderColor: activeTicket ? memberColor(m) : "var(--line)", cursor: activeTicket ? "pointer" : "default" }}
+              >
+                <Avatar member={m} size={28} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-semibold truncate">{m.name}</div>
+                  <div className="text-[11px] truncate" style={{ color: activeTicket ? "var(--ink)" : "var(--muted)" }}>
+                    {activeTicket ? `Working on: ${activeTicket.title}` : "Free — no active project"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-3 mb-4 items-center">
         <SectionTitle>Board</SectionTitle>
         <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
@@ -1693,7 +1764,7 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
   );
 }
 
-function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete }) {
+function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete, setActiveTicket }) {
   const [note, setNote] = useState("");
   const [revType, setRevType] = useState("minor");
   const [revCategory, setRevCategory] = useState(REVISION_CATEGORIES[0]);
@@ -1726,10 +1797,16 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const acc = ticketAccuracy(ticket);
   const toggleEPurpose = (p) => setEPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
 
+  const clearFocusIfMine = (memberId) => {
+    const member = roster.find((m) => m.id === memberId);
+    if (member?.activeTicketId === ticket.id) setActiveTicket(member.id, null);
+  };
   const assign = (memberId) => {
+    if (ticket.assignedTo) clearFocusIfMine(ticket.assignedTo);
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, assignedTo: memberId, status: t.status === "New" ? "Assigned" : t.status }), { __label: `Assigned to ${nameOf(roster, memberId)}` }));
   };
   const setStatus = (status) => {
+    if (CLOSED_STATUSES.includes(status) && ticket.assignedTo) clearFocusIfMine(ticket.assignedTo);
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status }), { __label: `Status → ${status}` }));
   };
   const addRevision = () => {
@@ -1766,6 +1843,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, satisfactionScore: v }), { __label: `Satisfaction rated ${v}/5` }));
   };
   const complete = () => {
+    if (ticket.assignedTo) clearFocusIfMine(ticket.assignedTo);
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO() }), { __label: "Approved & completed" }));
   };
   const reopen = () => {
@@ -1915,6 +1993,22 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                   {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
+            </div>
+          )}
+
+          {isAssignee && !CLOSED_STATUSES.includes(ticket.status) && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <SectionTitle>My focus</SectionTitle>
+              {currentUser?.activeTicketId === ticket.id ? (
+                <div className="flex items-center gap-3 mt-2">
+                  <span className="text-xs font-semibold flex items-center gap-1" style={{ color: "var(--teal)" }}><CheckCircle2 size={13} /> This is what you're working on now</span>
+                  <button onClick={() => setActiveTicket(currentUser.id, null)} className="text-xs font-semibold" style={{ color: "var(--muted)" }}>Clear</button>
+                </div>
+              ) : (
+                <button onClick={() => setActiveTicket(currentUser.id, ticket.id)} className="mt-2 px-3 py-1.5 rounded text-xs font-semibold border" style={{ borderColor: "var(--line)" }}>
+                  Set as what I'm working on now
+                </button>
+              )}
             </div>
           )}
 
@@ -2606,6 +2700,11 @@ function TeamHub(props) {
           galleryItems={props.galleryItems}
           addGalleryItem={props.addGalleryItem}
           removeGalleryItem={props.removeGalleryItem}
+          musicTracks={props.musicTracks}
+          nowPlaying={props.nowPlaying}
+          setNowPlaying={props.setNowPlaying}
+          toggleMusicLike={props.toggleMusicLike}
+          setSub={setSub}
         />
       )}
       {sub === "chat" && (
@@ -2654,7 +2753,7 @@ function TeamHub(props) {
   );
 }
 
-function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem }) {
+function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem, musicTracks, nowPlaying, setNowPlaying, toggleMusicLike, setSub }) {
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
@@ -2665,6 +2764,7 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
   const canEdit = isSelf || isAdmin;
+  const memberMusic = (musicTracks || []).filter((t) => t.memberId === selected?.id);
   // Private by design: a message only shows to the person it was sent to,
   // the person who sent it, or Admin. Nobody else sees it — even when
   // browsing someone else's profile.
@@ -2871,6 +2971,40 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <div className="flex items-center justify-between">
+            <SectionTitle>Favorite music</SectionTitle>
+            {isSelf && setSub && <button onClick={() => setSub("music")} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>Manage in Music Corner</button>}
+          </div>
+          <div className="grid grid-cols-3 gap-2 mt-3">
+            {[0, 1, 2].map((i) => {
+              const t = memberMusic[i];
+              if (!t) {
+                return (
+                  <div key={i} className="aspect-square rounded-md border-2 border-dashed flex items-center justify-center text-center p-2" style={{ borderColor: "var(--line)" }}>
+                    <span className="text-[10px]" style={{ color: "var(--muted)" }}>{isSelf ? "Add a track in Music Corner" : "Empty"}</span>
+                  </div>
+                );
+              }
+              const isPlaying = nowPlaying?.id === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setNowPlaying && setNowPlaying(t)}
+                  className="aspect-square rounded-md p-2 flex flex-col items-center justify-center text-center gap-1"
+                  style={{ background: isPlaying ? "var(--teal)" : "var(--paper)", border: "1px solid var(--line)" }}
+                >
+                  {isPlaying ? <Pause size={18} color="white" /> : <Play size={18} color="var(--ink)" />}
+                  <span className="text-[10px] font-semibold truncate w-full px-1" style={{ color: isPlaying ? "white" : "var(--ink)" }}>{t.title || "Untitled"}</span>
+                  <span className="text-[9px] flex items-center gap-0.5" style={{ color: isPlaying ? "white" : "var(--muted)" }}>
+                    <Heart size={9} fill={isPlaying ? "white" : "var(--coral)"} color={isPlaying ? "white" : "var(--coral)"} /> {(t.likes || []).length}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
           <SectionTitle>Most memorable projects</SectionTitle>
           {canEdit && (
             <div className="flex flex-wrap gap-2 mt-2 items-center">
@@ -2938,32 +3072,79 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   );
 }
 
-function NowPlayingBar({ track, onClose }) {
+function NowPlayingBar({ track, onClose, onEnded, onSkip }) {
+  const [expanded, setExpanded] = useState(false);
+  const playerRef = useRef(null);
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (track?.type === "youtube") {
+      ensureYouTubeApi().then(() => {
+        if (cancelled || !track) return;
+        if (playerRef.current) {
+          try { playerRef.current.destroy(); } catch (e) {}
+          playerRef.current = null;
+        }
+        playerRef.current = new window.YT.Player("now-playing-yt", {
+          videoId: track.youtubeId,
+          playerVars: { autoplay: 1 },
+          events: {
+            onStateChange: (e) => {
+              if (window.YT && e.data === window.YT.PlayerState.ENDED) onEndedRef.current && onEndedRef.current();
+            },
+          },
+        });
+      });
+    } else if (playerRef.current) {
+      try { playerRef.current.destroy(); } catch (e) {}
+      playerRef.current = null;
+    }
+    return () => {
+      cancelled = true;
+      if (playerRef.current) {
+        try { playerRef.current.destroy(); } catch (e) {}
+        playerRef.current = null;
+      }
+    };
+    // Only rebuild the player when the track itself changes — not when
+    // "expanded" toggles, so resizing the view never restarts playback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track?.id, track?.type]);
+
   if (!track) return null;
+
+  const ytWrapperStyle = expanded
+    ? { position: "fixed", bottom: 74, right: 16, zIndex: 50, width: 480, height: 270, background: "white", border: "2px solid var(--ink)", borderRadius: 8, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.25)" }
+    : { width: 160, height: 45, overflow: "hidden", borderRadius: 6, flexShrink: 0 };
+
   return (
     <div className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t shadow-lg" style={{ borderColor: "var(--line)" }}>
       <div className="max-w-6xl mx-auto px-4 py-2 flex items-center gap-3">
         <Music size={16} color="var(--teal)" className="flex-shrink-0" />
-        <div className="flex-1 min-w-0">
-          <div className="text-xs font-semibold truncate">
-            {track.title || "Untitled track"} <span style={{ color: "var(--muted)" }}>· {track.memberName}</span>
+        <div className="flex-1 min-w-0 flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-semibold truncate">
+              {track.title || "Untitled track"} <span style={{ color: "var(--muted)" }}>· {track.memberName}</span>
+            </div>
+            {track.type !== "youtube" && (
+              <audio key={track.id} controls autoPlay src={track.audioUrl} className="w-full mt-1" style={{ height: 32 }} onEnded={onEnded} />
+            )}
           </div>
-          {track.type === "youtube" ? (
-            <iframe
-              key={track.id}
-              width="260"
-              height="70"
-              src={`https://www.youtube.com/embed/${track.youtubeId}?autoplay=1`}
-              title={track.title || "music"}
-              frameBorder="0"
-              allow="autoplay; encrypted-media"
-              className="mt-1 rounded"
-            />
-          ) : (
-            <audio key={track.id} controls autoPlay src={track.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
+          {track.type === "youtube" && (
+            <div style={ytWrapperStyle}>
+              <div id="now-playing-yt" style={{ width: "100%", height: "100%" }} />
+            </div>
           )}
         </div>
-        <button onClick={onClose} className="flex-shrink-0"><X size={18} color="var(--muted)" /></button>
+        {track.type === "youtube" && (
+          <button onClick={() => setExpanded((e) => !e)} className="flex-shrink-0" title={expanded ? "Shrink player" : "Bigger player"}>
+            {expanded ? <Minimize2 size={16} color="var(--muted)" /> : <Maximize2 size={16} color="var(--muted)" />}
+          </button>
+        )}
+        <button onClick={onSkip} className="flex-shrink-0" title="Skip to next"><SkipForward size={16} color="var(--muted)" /></button>
+        <button onClick={onClose} className="flex-shrink-0" title="Stop"><X size={18} color="var(--muted)" /></button>
       </div>
     </div>
   );
