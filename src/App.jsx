@@ -3,7 +3,7 @@ import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
   MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
-  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music, Play, Pause
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -54,6 +54,22 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 // The single active track with the most likes — ties broken by whichever was
 // uploaded first. Used both to decide the extended-retention "featured"
 // track and to highlight it in the Music Corner UI.
+// Pulls the video id out of any common YouTube URL shape, so people can
+// just paste a link instead of downloading and re-uploading a file.
+function extractYouTubeId(url) {
+  const patterns = [
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
+  ];
+  for (const p of patterns) {
+    const m = (url || "").match(p);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 function mostLikedTrack(tracks) {
   return tracks.reduce((best, t) => {
     const count = (t.likes || []).length;
@@ -343,6 +359,7 @@ export default function CreativeOpsApp() {
   const [chatMessages, setChatMessages] = useState([]);
   const [galleryItems, setGalleryItems] = useState([]);
   const [musicTracks, setMusicTracks] = useState([]);
+  const [nowPlaying, setNowPlaying] = useState(null);
 
   useEffect(() => {
     const unsub = subscribeAuth((u) => {
@@ -542,15 +559,24 @@ export default function CreativeOpsApp() {
     const trackId = uid();
     try {
       const audioUrl = await uploadMusicTrack(trackId, file);
-      await musicApi.upsert({ id: trackId, memberId, memberName, title: title || "", audioUrl, date: new Date().toISOString(), likes: [] });
+      await musicApi.upsert({ id: trackId, type: "upload", memberId, memberName, title: title || "", audioUrl, date: new Date().toISOString(), likes: [] });
       return { ok: true };
     } catch (e) {
       return { error: "Upload failed. Try again." };
     }
   };
+  const addMusicLinkTrack = async (memberId, memberName, title, url) => {
+    const mine = musicTracks.filter((t) => t.memberId === memberId);
+    if (mine.length >= MUSIC_LIMIT_PER_MEMBER) return { error: `You've already got ${MUSIC_LIMIT_PER_MEMBER} tracks up — remove one first.` };
+    const youtubeId = extractYouTubeId(url);
+    if (!youtubeId) return { error: "That doesn't look like a YouTube link." };
+    await musicApi.upsert({ id: uid(), type: "youtube", memberId, memberName, title: title || "", youtubeId, sourceUrl: url, date: new Date().toISOString(), likes: [] });
+    return { ok: true };
+  };
   const removeMusicTrack = async (track) => {
     await musicApi.remove(track.id);
-    await deleteMusicTrackFile(track.id);
+    if (track.type !== "youtube") await deleteMusicTrackFile(track.id);
+    setNowPlaying((prev) => (prev?.id === track.id ? null : prev));
   };
   const toggleMusicLike = async (track, memberId) => {
     const likes = track.likes || [];
@@ -739,7 +765,7 @@ export default function CreativeOpsApp() {
         appTagline={appTagline}
       />
       <TabBar view={view} setView={setView} />
-      <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto">
+      <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto" style={{ paddingBottom: nowPlaying ? 110 : undefined }}>
         {view === "dashboard" && (
           <DashboardView
             tickets={tickets}
@@ -778,8 +804,11 @@ export default function CreativeOpsApp() {
             deleteChatMessage={deleteChatMessage}
             musicTracks={musicTracks}
             addMusicTrack={addMusicTrack}
+            addMusicLinkTrack={addMusicLinkTrack}
             removeMusicTrack={removeMusicTrack}
             toggleMusicLike={toggleMusicLike}
+            nowPlaying={nowPlaying}
+            setNowPlaying={setNowPlaying}
             wallpaperUrl={wallpaperUrl}
             saveWallpaper={saveWallpaper}
             clearWallpaper={clearWallpaper}
@@ -793,6 +822,7 @@ export default function CreativeOpsApp() {
           />
         )}
       </main>
+      <NowPlayingBar track={nowPlaying} onClose={() => setNowPlaying(null)} />
       {openTicket && (
         <TicketModal
           ticket={openTicket}
@@ -2595,8 +2625,11 @@ function TeamHub(props) {
           currentUser={props.currentUser}
           isAdmin={props.isAdmin}
           addMusicTrack={props.addMusicTrack}
+          addMusicLinkTrack={props.addMusicLinkTrack}
           removeMusicTrack={props.removeMusicTrack}
           toggleMusicLike={props.toggleMusicLike}
+          nowPlaying={props.nowPlaying}
+          setNowPlaying={props.setNowPlaying}
         />
       )}
       {sub === "roster" && (
@@ -2905,8 +2938,77 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   );
 }
 
-function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, removeMusicTrack, toggleMusicLike }) {
+function NowPlayingBar({ track, onClose }) {
+  if (!track) return null;
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t shadow-lg" style={{ borderColor: "var(--line)" }}>
+      <div className="max-w-6xl mx-auto px-4 py-2 flex items-center gap-3">
+        <Music size={16} color="var(--teal)" className="flex-shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-semibold truncate">
+            {track.title || "Untitled track"} <span style={{ color: "var(--muted)" }}>· {track.memberName}</span>
+          </div>
+          {track.type === "youtube" ? (
+            <iframe
+              key={track.id}
+              width="260"
+              height="70"
+              src={`https://www.youtube.com/embed/${track.youtubeId}?autoplay=1`}
+              title={track.title || "music"}
+              frameBorder="0"
+              allow="autoplay; encrypted-media"
+              className="mt-1 rounded"
+            />
+          ) : (
+            <audio key={track.id} controls autoPlay src={track.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
+          )}
+        </div>
+        <button onClick={onClose} className="flex-shrink-0"><X size={18} color="var(--muted)" /></button>
+      </div>
+    </div>
+  );
+}
+
+// A stable, top-level component (not defined inside MusicCornerView) —
+// this is what actually fixes playback interruption. Defining a component
+// inline inside a render function creates a brand-new function identity on
+// every render, which makes React treat it as a different component type
+// and remount it entirely — including audio elements — even for a change
+// as small as someone else liking an unrelated track. Hoisting it here
+// keeps the component identity stable across renders.
+function MusicTrackRow({ t, featured, isAdmin, currentUser, isPlaying, onPlay, onRemove, memberFor, daysLeftFor, likes, onLike }) {
+  const member = memberFor(t.memberId);
+  const canRemove = featured ? isAdmin : (isAdmin || t.memberId === currentUser?.id);
+  const liked = currentUser && likes.includes(currentUser.id);
+  return (
+    <div className="bg-white border rounded-md p-3 flex items-center gap-3" style={{ borderColor: featured ? "var(--amber)" : "var(--line)" }}>
+      <Avatar member={member} size={32} />
+      <button onClick={onPlay} className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center" style={{ background: isPlaying ? "var(--teal)" : "var(--paper)" }}>
+        {isPlaying ? <Pause size={14} color="white" /> : <Play size={14} color="var(--ink)" />}
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold truncate flex items-center gap-1.5">
+          {featured && <Trophy size={13} color="var(--amber)" />}
+          {t.title || "Untitled track"}
+          {t.type === "youtube" && <span className="text-[10px] px-1.5 py-0.5 rounded border flex-shrink-0" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>YouTube</span>}
+        </div>
+        <div className="text-[11px]" style={{ color: "var(--muted)" }}>
+          added by {t.memberName} · {daysLeftFor(t)} day{daysLeftFor(t) === 1 ? "" : "s"} left{featured ? " (featured — extended)" : ""}
+        </div>
+      </div>
+      <button onClick={onLike} className="flex flex-col items-center gap-0.5 flex-shrink-0">
+        <Heart size={16} fill={liked ? "var(--coral)" : "none"} color="var(--coral)" />
+        <span className="text-[10px]" style={{ color: "var(--muted)" }}>{likes.length}</span>
+      </button>
+      {canRemove && <button onClick={onRemove}><X size={14} color="var(--muted)" /></button>}
+    </div>
+  );
+}
+
+function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, addMusicLinkTrack, removeMusicTrack, toggleMusicLike, nowPlaying, setNowPlaying }) {
+  const [mode, setMode] = useState("link"); // "link" | "upload"
   const [title, setTitle] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const MAX_MB = 15;
@@ -2934,30 +3036,13 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
     setUploading(false);
   };
 
-  const TrackRow = ({ t, featured }) => {
-    const member = memberFor(t.memberId);
-    const canRemove = featured ? isAdmin : (isAdmin || t.memberId === currentUser?.id);
-    const liked = currentUser && (t.likes || []).includes(currentUser.id);
-    return (
-      <div className="bg-white border rounded-md p-3 flex items-center gap-3" style={{ borderColor: featured ? "var(--amber)" : "var(--line)" }}>
-        <Avatar member={member} size={32} />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-semibold truncate flex items-center gap-1.5">
-            {featured && <Trophy size={13} color="var(--amber)" />}
-            {t.title || "Untitled track"}
-          </div>
-          <div className="text-[11px]" style={{ color: "var(--muted)" }}>
-            added by {t.memberName} · {daysLeft(t)} day{daysLeft(t) === 1 ? "" : "s"} left{featured ? " (featured — extended)" : ""}
-          </div>
-          <audio controls src={t.audioUrl} className="w-full mt-1" style={{ height: 32 }} />
-        </div>
-        <button onClick={() => currentUser && toggleMusicLike(t, currentUser.id)} disabled={!currentUser} className="flex flex-col items-center gap-0.5 flex-shrink-0">
-          <Heart size={16} fill={liked ? "var(--coral)" : "none"} color="var(--coral)" />
-          <span className="text-[10px]" style={{ color: "var(--muted)" }}>{(t.likes || []).length}</span>
-        </button>
-        {canRemove && <button onClick={() => removeMusicTrack(t)}><X size={14} color="var(--muted)" /></button>}
-      </div>
-    );
+  const handleLinkSubmit = async (e) => {
+    e.preventDefault();
+    if (!linkUrl.trim() || !currentUser) return;
+    setError("");
+    const res = await addMusicLinkTrack(currentUser.id, currentUser.name, title, linkUrl.trim());
+    if (res?.error) setError(res.error);
+    else { setTitle(""); setLinkUrl(""); }
   };
 
   return (
@@ -2968,28 +3053,43 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
           <SectionTitle>Music Corner — a track from anyone, for everyone</SectionTitle>
         </div>
         <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-          Up to {LIMIT} tracks per person, {MAX_MB}MB each. Tracks disappear after 3 days — except the most-liked track, which stays for 2 weeks and can only be removed by Admin.
+          Up to {LIMIT} tracks per person. Tracks disappear after 3 days — except the most-liked track, which stays for 2 weeks and can only be removed by Admin.
+          Paste a link and it plays right here, never opens another tab — but note: YouTube ads (if any) are controlled by YouTube, not by this app. Upload a file instead for a guaranteed ad-free track.
         </div>
         {currentUser ? (
           <div className="mt-3">
-            <div className="text-xs mb-1" style={{ color: "var(--muted)" }}>Your slots: {mine.length}/{LIMIT}</div>
+            <div className="text-xs mb-2" style={{ color: "var(--muted)" }}>Your slots: {mine.length}/{LIMIT}</div>
             {atLimit ? (
               <div className="text-xs" style={{ color: "var(--coral)" }}>You're at your limit — remove one of your tracks below to add another.</div>
             ) : (
-              <div className="flex flex-wrap gap-2 items-center">
-                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Song title (optional)" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[140px]" style={{ borderColor: "var(--line)" }} />
-                <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
-                  <Upload size={13} /> Add track
-                  <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleUpload(e.target.files?.[0])} />
-                </label>
-              </div>
+              <>
+                <div className="flex border rounded overflow-hidden w-fit mb-2" style={{ borderColor: "var(--line)" }}>
+                  <button onClick={() => setMode("link")} className="px-3 py-1 text-xs font-semibold" style={{ background: mode === "link" ? "var(--ink)" : "white", color: mode === "link" ? "white" : "var(--ink)" }}>Paste a link</button>
+                  <button onClick={() => setMode("upload")} className="px-3 py-1 text-xs font-semibold" style={{ background: mode === "upload" ? "var(--ink)" : "white", color: mode === "upload" ? "white" : "var(--ink)" }}>Upload file</button>
+                </div>
+                {mode === "link" ? (
+                  <form onSubmit={handleLinkSubmit} className="flex flex-wrap gap-2 items-center">
+                    <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Song title (optional)" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[120px]" style={{ borderColor: "var(--line)" }} />
+                    <input value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} placeholder="Paste a YouTube link…" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[160px]" style={{ borderColor: "var(--line)" }} />
+                    <button type="submit" className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold text-white" style={{ background: "var(--ink)" }}><LinkIcon size={13} /> Add link</button>
+                  </form>
+                ) : (
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Song title (optional)" className="border rounded px-2 py-1.5 text-sm flex-1 min-w-[140px]" style={{ borderColor: "var(--line)" }} />
+                    <label className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border cursor-pointer" style={{ borderColor: "var(--line)" }}>
+                      <Upload size={13} /> Add file (up to {MAX_MB}MB)
+                      <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleUpload(e.target.files?.[0])} />
+                    </label>
+                  </div>
+                )}
+              </>
             )}
             {uploading && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Uploading…</div>}
             {error && <div className="text-xs mt-1" style={{ color: "var(--coral)" }}>{error}</div>}
           </div>
         ) : (
           <div className="mt-3 text-xs" style={{ color: "var(--coral)" }}>
-            Your login isn't linked to a team profile yet, so you can't upload here. Go to Roster &amp; Settings and make sure a profile's "Login email" exactly matches the email you signed in with.
+            Your login isn't linked to a team profile yet, so you can't add tracks here. Go to Roster &amp; Settings and make sure a profile's "Login email" exactly matches the email you signed in with.
           </div>
         )}
       </div>
@@ -3000,7 +3100,12 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
             <Trophy size={14} color="var(--amber)" />
             <SectionTitle>Most liked right now</SectionTitle>
           </div>
-          <TrackRow t={topTrack} featured />
+          <MusicTrackRow
+            t={topTrack} featured isAdmin={isAdmin} currentUser={currentUser}
+            isPlaying={nowPlaying?.id === topTrack.id} onPlay={() => setNowPlaying(topTrack)}
+            onRemove={() => removeMusicTrack(topTrack)} memberFor={memberFor} daysLeftFor={daysLeft}
+            likes={topTrack.likes || []} onLike={() => currentUser && toggleMusicLike(topTrack, currentUser.id)}
+          />
         </div>
       )}
 
@@ -3010,7 +3115,14 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
           <EmptyState text="No tracks yet — be the first to add one." />
         ) : (
           <div className="space-y-2 mt-2">
-            {sorted.map((t) => <TrackRow key={t.id} t={t} featured={topTrack && t.id === topTrack.id} />)}
+            {sorted.map((t) => (
+              <MusicTrackRow
+                key={t.id} t={t} featured={topTrack && t.id === topTrack.id} isAdmin={isAdmin} currentUser={currentUser}
+                isPlaying={nowPlaying?.id === t.id} onPlay={() => setNowPlaying(t)}
+                onRemove={() => removeMusicTrack(t)} memberFor={memberFor} daysLeftFor={daysLeft}
+                likes={t.likes || []} onLike={() => currentUser && toggleMusicLike(t, currentUser.id)}
+              />
+            ))}
           </div>
         )}
       </div>
