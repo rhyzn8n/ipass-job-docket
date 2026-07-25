@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot, query, where } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
@@ -151,3 +151,35 @@ export const musicApi = makeCollectionApi("music_corner_tracks");
 // directly (only sender, recipient, or Admin can read a given message) —
 // not just the app's own UI filtering.
 export const endorsementsApi = makeCollectionApi("endorsements_v2");
+
+// Endorsements need query-scoped listeners, not a collection-wide one.
+// Firestore requires that a "listen to everything" query be fully readable —
+// it won't silently skip documents you don't have access to, it just
+// rejects the whole request. So instead of listening to the whole
+// collection, this asks two specific questions Firestore CAN answer without
+// ever touching a message that isn't yours: "sent to me" and "sent by me".
+// Admin can listen to everything since the rules grant Admin full read.
+export function subscribeMyEndorsements(email, isAdminUser, callback) {
+  if (isAdminUser) {
+    return onSnapshot(collection(db, "endorsements_v2"), (snap) => {
+      callback(snap.docs.map((d) => d.data()));
+    });
+  }
+  const lower = (email || "").toLowerCase();
+  let toResults = [];
+  let fromResults = [];
+  const merge = () => {
+    const map = new Map();
+    for (const d of [...toResults, ...fromResults]) map.set(d.id, d);
+    callback(Array.from(map.values()));
+  };
+  const unsubTo = onSnapshot(query(collection(db, "endorsements_v2"), where("toEmail", "==", lower)), (snap) => {
+    toResults = snap.docs.map((d) => d.data());
+    merge();
+  });
+  const unsubFrom = onSnapshot(query(collection(db, "endorsements_v2"), where("fromEmail", "==", lower)), (snap) => {
+    fromResults = snap.docs.map((d) => d.data());
+    merge();
+  });
+  return () => { unsubTo(); unsubFrom(); };
+}
