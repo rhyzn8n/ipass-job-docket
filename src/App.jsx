@@ -1881,10 +1881,10 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-start md:items-center justify-center z-50 p-3 overflow-y-auto" onClick={onClose}>
-      <div className="bg-white rounded-md max-w-xl w-full my-6" style={{ fontFamily: "var(--font-body)" }} onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/40 flex items-start md:items-center justify-center z-50 p-3" onClick={onClose}>
+      <div className="bg-white rounded-md max-w-xl w-full my-6 max-h-[85vh] overflow-y-auto" style={{ fontFamily: "var(--font-body)" }} onClick={(e) => e.stopPropagation()}>
         <div className="docket-perf" />
-        <div className="p-5">
+        <div className="sticky top-0 bg-white z-10 px-5 pt-5 pb-3" style={{ borderBottom: "1px solid var(--line)" }}>
           <div className="flex items-start justify-between mb-2">
             <div className="flex-1">
               <div className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
@@ -1903,7 +1903,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             </div>
           </div>
 
-          <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
             <StampBadge priority={editing ? ePriority : ticket.priority} />
             <StatusPill status={ticket.status} />
             {!editing && ticket.contentType && <span className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{ticket.contentType}</span>}
@@ -1911,7 +1911,9 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
               <span key={p} className="text-[11px] px-2 py-0.5 rounded border" style={{ borderColor: "var(--line)", color: "var(--muted)" }}>{p}</span>
             ))}
           </div>
+        </div>
 
+        <div className="px-5 pt-3 pb-5">
           {!editing ? (
             <>
               {ticket.description && <p className="text-sm mb-2">{ticket.description}</p>}
@@ -2700,11 +2702,8 @@ function TeamHub(props) {
           galleryItems={props.galleryItems}
           addGalleryItem={props.addGalleryItem}
           removeGalleryItem={props.removeGalleryItem}
-          musicTracks={props.musicTracks}
           nowPlaying={props.nowPlaying}
           setNowPlaying={props.setNowPlaying}
-          toggleMusicLike={props.toggleMusicLike}
-          setSub={setSub}
         />
       )}
       {sub === "chat" && (
@@ -2753,18 +2752,21 @@ function TeamHub(props) {
   );
 }
 
-function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem, musicTracks, nowPlaying, setNowPlaying, toggleMusicLike, setSub }) {
+function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, addEndorsement, deleteEndorsement, saveRoster, tickets, galleryItems, addGalleryItem, removeGalleryItem, nowPlaying, setNowPlaying }) {
   const [selectedId, setSelectedId] = useState(roster[0]?.id || "");
   const [message, setMessage] = useState("");
   const [editingBio, setEditingBio] = useState(false);
   const [profileWallpaper, setProfileWallpaper] = useState(null);
   const [pendingHasWallpaper, setPendingHasWallpaper] = useState(false);
   const [form, setForm] = useState({ bio: "", likes: "", mobile: "", email: "", favoriteFood: "", favoriteMusic: "", wishlist: "", quote: "" });
+  const [musicLinks, setMusicLinks] = useState([{ url: "", title: "" }, { url: "", title: "" }, { url: "", title: "" }]);
 
   const selected = roster.find((m) => m.id === selectedId) || roster[0];
   const isSelf = selected && currentUser && selected.id === currentUser.id;
   const canEdit = isSelf || isAdmin;
-  const memberMusic = (musicTracks || []).filter((t) => t.memberId === selected?.id);
+  // Permanent and profile-owned — unlike Music Corner, these never expire
+  // and aren't shared team inventory, just this person's own picks.
+  const favoriteMusicLinks = selected?.favoriteMusicLinks || [];
   // Private by design: a message only shows to the person it was sent to,
   // the person who sent it, or Admin. Nobody else sees it — even when
   // browsing someone else's profile.
@@ -2780,6 +2782,8 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
         email: selected.email || "", favoriteFood: selected.favoriteFood || "", favoriteMusic: selected.favoriteMusic || "",
         wishlist: selected.wishlist || "", quote: selected.quote || "",
       });
+      const existing = selected.favoriteMusicLinks || [];
+      setMusicLinks([0, 1, 2].map((i) => existing[i] ? { url: existing[i].url || "", title: existing[i].title || "" } : { url: "", title: "" }));
       setPendingHasWallpaper(!!selected.hasProfileWallpaper);
       if (selected.hasProfileWallpaper) loadProfileWallpaper(selected.id).then(setProfileWallpaper);
       else setProfileWallpaper(null);
@@ -2788,12 +2792,17 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
   }, [selected?.id, selected?.hasProfileWallpaper]);
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const setMusicLinkField = (i, key, value) => setMusicLinks((prev) => prev.map((row, idx) => (idx === i ? { ...row, [key]: value } : row)));
 
   // Wallpaper flag is saved together with the rest of the profile fields in
   // one write (not as a separate save call) so a photo upload followed
   // quickly by "Save" can never overwrite each other.
   const saveProfile = () => {
-    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper } : m)));
+    const cleanedMusicLinks = musicLinks
+      .filter((row) => row.url.trim())
+      .map((row) => ({ url: row.url.trim(), title: row.title.trim(), youtubeId: extractYouTubeId(row.url) }))
+      .filter((row) => row.youtubeId);
+    saveRoster(roster.map((m) => (m.id === selected.id ? { ...m, ...form, hasProfileWallpaper: pendingHasWallpaper, favoriteMusicLinks: cleanedMusicLinks } : m)));
     setEditingBio(false);
   };
 
@@ -2971,37 +2980,51 @@ function TeamSpaceView({ roster, currentUser, isLead, isAdmin, endorsements, add
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <div className="flex items-center justify-between">
-            <SectionTitle>Favorite music</SectionTitle>
-            {isSelf && setSub && <button onClick={() => setSub("music")} className="text-[11px] font-semibold" style={{ color: "var(--teal)" }}>Manage in Music Corner</button>}
-          </div>
-          <div className="grid grid-cols-3 gap-2 mt-3">
-            {[0, 1, 2].map((i) => {
-              const t = memberMusic[i];
-              if (!t) {
+          <SectionTitle>Favorite music</SectionTitle>
+          {!editingBio ? (
+            <div className="grid grid-cols-3 gap-2 mt-3">
+              {[0, 1, 2].map((i) => {
+                const link = favoriteMusicLinks[i];
+                if (!link) {
+                  return (
+                    <div key={i} className="aspect-square rounded-md border-2 border-dashed flex items-center justify-center text-center p-2" style={{ borderColor: "var(--line)" }}>
+                      <span className="text-[10px]" style={{ color: "var(--muted)" }}>{isSelf ? "Paste a link in Edit profile" : "Empty"}</span>
+                    </div>
+                  );
+                }
+                const trackId = `profile-${selected.id}-${i}`;
+                const isPlaying = nowPlaying?.id === trackId;
                 return (
-                  <div key={i} className="aspect-square rounded-md border-2 border-dashed flex items-center justify-center text-center p-2" style={{ borderColor: "var(--line)" }}>
-                    <span className="text-[10px]" style={{ color: "var(--muted)" }}>{isSelf ? "Add a track in Music Corner" : "Empty"}</span>
-                  </div>
+                  <button
+                    key={i}
+                    onClick={() => setNowPlaying && setNowPlaying({ id: trackId, type: "youtube", youtubeId: link.youtubeId, title: link.title, memberName: selected.name })}
+                    className="aspect-square rounded-md relative overflow-hidden flex items-end"
+                    style={{ border: "1px solid var(--line)" }}
+                  >
+                    <img src={`https://img.youtube.com/vi/${link.youtubeId}/hqdefault.jpg`} alt={link.title || "music"} className="absolute inset-0 w-full h-full object-cover" />
+                    <div className="absolute inset-0" style={{ background: isPlaying ? "rgba(46,107,96,0.75)" : "linear-gradient(to top, rgba(0,0,0,0.65), rgba(0,0,0,0.05))" }} />
+                    <div className="relative w-full p-1.5 flex items-center gap-1">
+                      {isPlaying ? <Pause size={14} color="white" /> : <Play size={14} color="white" />}
+                      <span className="text-[10px] font-semibold text-white truncate">{link.title || "Untitled"}</span>
+                    </div>
+                  </button>
                 );
-              }
-              const isPlaying = nowPlaying?.id === t.id;
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => setNowPlaying && setNowPlaying(t)}
-                  className="aspect-square rounded-md p-2 flex flex-col items-center justify-center text-center gap-1"
-                  style={{ background: isPlaying ? "var(--teal)" : "var(--paper)", border: "1px solid var(--line)" }}
-                >
-                  {isPlaying ? <Pause size={18} color="white" /> : <Play size={18} color="var(--ink)" />}
-                  <span className="text-[10px] font-semibold truncate w-full px-1" style={{ color: isPlaying ? "white" : "var(--ink)" }}>{t.title || "Untitled"}</span>
-                  <span className="text-[9px] flex items-center gap-0.5" style={{ color: isPlaying ? "white" : "var(--muted)" }}>
-                    <Heart size={9} fill={isPlaying ? "white" : "var(--coral)"} color={isPlaying ? "white" : "var(--coral)"} /> {(t.likes || []).length}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2 mt-2">
+              {musicLinks.map((row, i) => (
+                <div key={i} className="flex gap-2 items-start">
+                  <input value={row.title} onChange={(e) => setMusicLinkField(i, "title", e.target.value)} placeholder="Title (optional)" className="border rounded px-2 py-1.5 text-sm w-1/3" style={{ borderColor: "var(--line)" }} />
+                  <div className="flex-1">
+                    <input value={row.url} onChange={(e) => setMusicLinkField(i, "url", e.target.value)} placeholder="Paste a YouTube link…" className="border rounded px-2 py-1.5 text-sm w-full" style={{ borderColor: "var(--line)" }} />
+                    {row.url.trim() && !extractYouTubeId(row.url) && <div className="text-[10px] mt-0.5" style={{ color: "var(--coral)" }}>Not a valid YouTube link</div>}
+                  </div>
+                </div>
+              ))}
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>Permanent — these don't expire, and aren't shared with the rest of the team's Music Corner.</div>
+            </div>
+          )}
         </div>
 
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
