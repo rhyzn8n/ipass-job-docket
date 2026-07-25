@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, endorsementsApi, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, endorsementsApi, subscribeMyEndorsements, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -404,7 +404,10 @@ export default function CreativeOpsApp() {
       unsubTagline = storage.subscribe("app_tagline", true, (val) => setAppTagline(val || ""));
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
-      unsubEndorsements = endorsementsApi.subscribe((list) => setEndorsements(list));
+      {
+        const isAdminNow = !!authUser.email && ADMIN_EMAILS.map((e) => e.toLowerCase()).includes(authUser.email.toLowerCase());
+        unsubEndorsements = subscribeMyEndorsements(authUser.email, isAdminNow, (list) => setEndorsements(list));
+      }
       unsubChat = chatApi.subscribe((list) => setChatMessages(list));
       unsubGallery = galleryApi.subscribe((list) => setGalleryItems(list));
       unsubMusic = musicApi.subscribe((list) => setMusicTracks(list));
