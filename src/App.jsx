@@ -9,7 +9,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, endorsementsApi, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -404,7 +404,7 @@ export default function CreativeOpsApp() {
       unsubTagline = storage.subscribe("app_tagline", true, (val) => setAppTagline(val || ""));
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
-      unsubEndorsements = storage.subscribe("endorsements", true, (val) => setEndorsements(val ? JSON.parse(val) : []));
+      unsubEndorsements = endorsementsApi.subscribe((list) => setEndorsements(list));
       unsubChat = chatApi.subscribe((list) => setChatMessages(list));
       unsubGallery = galleryApi.subscribe((list) => setGalleryItems(list));
       unsubMusic = musicApi.subscribe((list) => setMusicTracks(list));
@@ -426,13 +426,16 @@ export default function CreativeOpsApp() {
   }, [authUser]);
 
   const saveRoster = async (next) => {
-    const previousIds = new Set(roster.map((m) => m.id));
+    const prevById = new Map(roster.map((m) => [m.id, m]));
     const nextIds = new Set(next.map((m) => m.id));
     setRoster(next);
     for (const m of next) {
-      try { await rosterApi.upsert(m); } catch (e) {}
+      const prev = prevById.get(m.id);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(m)) {
+        try { await rosterApi.upsert(m); } catch (e) {}
+      }
     }
-    for (const id of previousIds) {
+    for (const id of prevById.keys()) {
       if (!nextIds.has(id)) {
         try { await rosterApi.remove(id); } catch (e) {}
       }
@@ -496,14 +499,20 @@ export default function CreativeOpsApp() {
 
   const addEndorsement = async (toMemberId, message) => {
     if (!message.trim()) return;
-    const next = [{ id: uid(), toMemberId, fromId: currentUser?.id || null, fromName: currentUser?.name || "Unknown", message, date: new Date().toISOString() }, ...endorsements];
-    setEndorsements(next);
-    try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
+    const toMember = roster.find((m) => m.id === toMemberId);
+    await endorsementsApi.upsert({
+      id: uid(),
+      toMemberId,
+      toEmail: (toMember?.email || "").toLowerCase(),
+      fromId: currentUser?.id || null,
+      fromEmail: (currentUser?.email || authUser?.email || "").toLowerCase(),
+      fromName: currentUser?.name || "Unknown",
+      message,
+      date: new Date().toISOString(),
+    });
   };
   const deleteEndorsement = async (id) => {
-    const next = endorsements.filter((e2) => e2.id !== id);
-    setEndorsements(next);
-    try { await storage.set("endorsements", JSON.stringify(next), true); } catch (e) {}
+    await endorsementsApi.remove(id);
   };
 
   const sendChatMessage = async (text, attachmentUrl) => {
@@ -619,8 +628,7 @@ export default function CreativeOpsApp() {
       try { await storage.set("reminders", JSON.stringify(data.reminders), true); } catch (e) {}
     }
     if (Array.isArray(data.endorsements)) {
-      setEndorsements(data.endorsements);
-      try { await storage.set("endorsements", JSON.stringify(data.endorsements), true); } catch (e) {}
+      for (const e of data.endorsements) await endorsementsApi.upsert(e);
     }
     window.alert("Restore complete.");
   };
