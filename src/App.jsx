@@ -1162,53 +1162,99 @@ function RemindersPanel({ reminders, addReminder, deleteReminder }) {
   );
 }
 
+// Mirrors the MLBB ranked ladder, low to high. Lower six tiers use discrete
+// divisions (roman numerals, low number = entry, I = closest to promotion);
+// top four use continuous "stars" instead. Each tier owns a percentile band
+// (0–100) — see getMLBBRank below for how a score becomes a position here.
+const MLBB_LADDER = [
+  { name: "Warrior", emoji: "🛡️", divisions: [3, 2, 1], bandStart: 0, bandEnd: 12 },
+  { name: "Elite", emoji: "🥉", divisions: [3, 2, 1], bandStart: 12, bandEnd: 24 },
+  { name: "Master", emoji: "🥈", divisions: [4, 3, 2, 1], bandStart: 24, bandEnd: 40 },
+  { name: "Grandmaster", emoji: "⭐", divisions: [5, 4, 3, 2, 1], bandStart: 40, bandEnd: 60 },
+  { name: "Epic", emoji: "💎", divisions: [5, 4, 3, 2, 1], bandStart: 60, bandEnd: 76 },
+  { name: "Legend", emoji: "👑", divisions: [5, 4, 3, 2, 1], bandStart: 76, bandEnd: 92 },
+  { name: "Mythic", emoji: "🔥", stars: [0, 24], bandStart: 92, bandEnd: 95 },
+  { name: "Mythical Honor", emoji: "🏅", stars: [25, 49], bandStart: 95, bandEnd: 97 },
+  { name: "Mythical Glory", emoji: "🌟", stars: [50, 99], bandStart: 97, bandEnd: 99 },
+  { name: "Mythical Immortal", emoji: "💠", stars: [100, 150], bandStart: 99, bandEnd: 100 },
+];
+const ROMAN = { 5: "V", 4: "IV", 3: "III", 2: "II", 1: "I" };
+
+// percentile (0–100) = this person's position between the team's lowest and
+// highest score THIS MONTH — auto-scales the whole ladder to fit however
+// many people and whatever range of scores exist, with no manual tuning.
+function getMLBBRank(percentile) {
+  const p = Math.max(0, Math.min(100, percentile));
+  const tier = MLBB_LADDER.find((t) => p >= t.bandStart && p <= t.bandEnd) || MLBB_LADDER[0];
+  const span = tier.bandEnd - tier.bandStart || 1;
+  const subPos = (p - tier.bandStart) / span;
+  if (tier.divisions) {
+    const idx = Math.min(tier.divisions.length - 1, Math.floor(subPos * tier.divisions.length));
+    return { name: tier.name, emoji: tier.emoji, label: `${tier.name} ${ROMAN[tier.divisions[idx]]}` };
+  }
+  const stars = Math.round(tier.stars[0] + subPos * (tier.stars[1] - tier.stars[0]));
+  return { name: tier.name, emoji: tier.emoji, label: tier.name, stars };
+}
+
 function LeaderboardPanel({ tickets, roster }) {
   const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
-  const ranked = members
-    .map((m) => {
-      const done = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed");
-      const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
-      // Completions carry the most weight, but a lower average revision count
-      // (fewer minor/major revisions per project) pulls someone up the board —
-      // most completed AND cleanest work wins, not just raw volume.
-      return { member: m, completed: done.length, avgRev: Number(avgRev.toFixed(2)), score: done.length - avgRev };
+  const thisMonth = monthKey(todayISO());
+  const stats = members.map((m) => {
+    const done = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed" && monthKey(t.dateCompleted) === thisMonth);
+    const completed = done.length;
+    const units = done.reduce((s, t) => s + (t.units || 0), 0);
+    const accs = done.map(ticketAccuracy).filter((a) => a !== null);
+    const avgAcc = accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : 0;
+    const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
+    // Same idea as before — completions and units drive the score up,
+    // accuracy nudges it further, and revisions pull it back down.
+    const score = completed * 10 + units * 2 + avgAcc / 5 - avgRev * 5;
+    return { member: m, completed, units, avgAcc: Math.round(avgAcc), avgRev: Number(avgRev.toFixed(2)), score };
+  });
+  const scores = stats.map((s) => s.score);
+  const maxScore = Math.max(...scores, 0);
+  const minScore = Math.min(...scores, 0);
+  const ranked = stats
+    .map((s) => {
+      const percentile = maxScore <= 0 || maxScore === minScore ? 0 : ((s.score - minScore) / (maxScore - minScore)) * 100;
+      return { ...s, rank: getMLBBRank(percentile) };
     })
-    .filter((r) => r.completed > 0)
-    .sort((a, b) => b.score - a.score || b.completed - a.completed || a.avgRev - b.avgRev)
-    .slice(0, 5);
-
-  const medalColor = ["#D9A441", "#A8A8A8", "#B08D57"];
-  const avatarSize = (i) => (i === 0 ? 52 : i === 1 ? 40 : i === 2 ? 36 : 28);
+    .sort((a, b) => b.score - a.score);
+  const anyActivity = ranked.some((r) => r.completed > 0);
 
   return (
     <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
       <div className="flex items-center gap-1.5">
         <Trophy size={14} color="var(--amber)" />
-        <SectionTitle>Leaderboard — most completed, lowest revisions (all-time)</SectionTitle>
+        <SectionTitle>Monthly ranked ladder — {thisMonth}</SectionTitle>
       </div>
-      {ranked.length === 0 ? (
-        <EmptyState text="No completed projects yet — first one on the board wins." />
+      {!anyActivity ? (
+        <EmptyState text="No completions yet this month — the season just started." />
       ) : (
-        <div className="mt-3 space-y-3">
+        <div className="mt-3 space-y-1">
           {ranked.map((r, i) => (
-            <div key={r.member.id} className="flex items-center gap-3" style={{ opacity: i === 0 ? 1 : 0.92 }}>
-              <div className="w-6 text-center font-black flex-shrink-0" style={{ fontFamily: "var(--font-display)", color: i < 3 ? medalColor[i] : "var(--muted)" }}>
-                {i < 3 ? <Trophy size={i === 0 ? 20 : 16} color={medalColor[i]} /> : i + 1}
-              </div>
-              <div style={i === 0 ? { boxShadow: "0 0 0 3px var(--amber)", borderRadius: "9999px" } : {}}>
-                <Avatar member={r.member} size={avatarSize(i)} />
-              </div>
-              <div className="flex-1">
-                <div className={i === 0 ? "text-base font-black" : "text-sm font-semibold"} style={i === 0 ? { fontFamily: "var(--font-display)" } : {}}>{r.member.name}</div>
-                <div className="text-[11px]" style={{ color: i === 0 ? "var(--amber)" : "var(--muted)" }}>
-                  {i === 0 ? "Top performer — " : ""}{r.completed} completed · {r.avgRev} avg revisions
+            <div key={r.member.id} className="flex items-center gap-3 p-2 rounded" style={{ background: i === 0 ? "var(--paper)" : "transparent" }}>
+              <Avatar member={r.member} size={i === 0 ? 44 : 32} />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={i === 0 ? "text-sm font-black" : "text-sm font-semibold"} style={i === 0 ? { fontFamily: "var(--font-display)" } : {}}>{r.member.name}</span>
+                  <span className="text-xs font-bold flex items-center gap-1" style={{ color: "var(--amber)" }}>
+                    {r.rank.emoji} {r.rank.label}{r.rank.stars !== undefined ? ` · ${r.rank.stars}★` : ""}
+                  </span>
+                </div>
+                <div className="text-[11px] flex flex-wrap gap-x-3 mt-0.5" style={{ color: "var(--muted)" }}>
+                  <span>{r.completed} completed</span>
+                  <span>{r.units} units</span>
+                  <span>{r.avgAcc}% accuracy</span>
+                  <span>{r.avgRev} avg revisions</span>
+                  <span className="font-semibold" style={{ color: "var(--ink)" }}>{Math.round(r.score)} pts</span>
                 </div>
               </div>
-              <div className={i === 0 ? "text-xl font-black" : "text-sm font-black"} style={{ fontFamily: "var(--font-display)" }}>{r.completed}</div>
             </div>
           ))}
         </div>
       )}
+      <div className="text-[10px] mt-3" style={{ color: "var(--muted)" }}>Fresh season every month — ranks are based only on this month's completed work, resetting on the 1st.</div>
     </div>
   );
 }
