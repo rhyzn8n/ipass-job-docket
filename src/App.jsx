@@ -47,8 +47,40 @@ const REVISION_CATEGORIES = ["Typo/Text error", "Wrong color", "Wrong size/dimen
 const PRIORITY_COLOR = { Low: "var(--muted)", Normal: "var(--teal)", High: "var(--amber)", Urgent: "var(--coral)" };
 const PIE_COLORS = ["var(--amber)", "var(--teal)", "var(--coral)", "var(--muted)", "#7A6FB0", "#4C8FBD"];
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// Uses LOCAL date components, not toISOString() — toISOString() converts to
+// UTC, which silently rolls back to the previous calendar day for any
+// timezone ahead of UTC (like the Philippines, UTC+8) during early morning
+// hours, and — more importantly — was the root cause of "last month"
+// comparisons landing on the wrong month throughout the app.
+const todayISO = () => {
+  const d = new Date();
+  const yy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
 const monthKey = (isoDate) => (isoDate ? isoDate.slice(0, 7) : "");
+// Shifts a "YYYY-MM" key by whole months using pure integer math — never
+// touches Date/toISOString, so it can't pick up a timezone-driven shift.
+function shiftMonthKey(monthStr, delta) {
+  const [y, m] = monthStr.split("-").map(Number);
+  const total = y * 12 + (m - 1) + delta;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2, "0")}`;
+}
+// Shifts a "YYYY-MM-DD" key by whole days, staying entirely in local-time
+// getters/setters (never crossing into toISOString/UTC) so it can't shift
+// by a day the way the old pattern did.
+function shiftDayKey(dayStr, delta) {
+  const [y, m, d] = dayStr.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + delta);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 // The single active track with the most likes — ties broken by whichever was
@@ -1287,10 +1319,8 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
   const overallCompleted = tickets.filter((t) => t.status === "Completed").length;
   const overallOverdue = tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO()).length;
 
-  const now = new Date();
-  const thisMonthKey = now.toISOString().slice(0, 7);
-  const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const lastMonthKey = lastMonthDate.toISOString().slice(0, 7);
+  const thisMonthKey = monthKey(todayISO());
+  const lastMonthKey = shiftMonthKey(thisMonthKey, -1);
   const unitsInMonth = (mk) => tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk).reduce((s, t) => s + (t.units || 0), 0);
   const unitsThisMonth = unitsInMonth(thisMonthKey);
   const unitsLastMonth = unitsInMonth(lastMonthKey);
@@ -2261,9 +2291,9 @@ function ReportsView({ tickets, roster }) {
   // meaningful for monthly/daily modes, since a custom range has no fixed
   // equivalent "previous" range to compare against.
   const prevPeriodKey = periodType === "monthly"
-    ? (() => { const b = new Date(month + "-01"); return new Date(b.getFullYear(), b.getMonth() - 1, 1).toISOString().slice(0, 7); })()
+    ? shiftMonthKey(month, -1)
     : periodType === "daily"
-    ? (() => { const b = new Date(day + "T00:00:00"); b.setDate(b.getDate() - 1); return b.toISOString().slice(0, 10); })()
+    ? shiftDayKey(day, -1)
     : null;
   const completedInPrevPeriod = prevPeriodKey
     ? tickets.filter((t) => t.status === "Completed" && (periodType === "monthly" ? monthKey(t.dateCompleted) === prevPeriodKey : t.dateCompleted === prevPeriodKey))
@@ -2329,11 +2359,8 @@ function ReportsView({ tickets, roster }) {
   const trend = useMemo(() => {
     if (periodType === "daily") {
       const days = [];
-      const base = new Date(day + "T00:00:00");
       for (let i = 13; i >= 0; i--) {
-        const d = new Date(base);
-        d.setDate(base.getDate() - i);
-        days.push(d.toISOString().slice(0, 10));
+        days.push(shiftDayKey(day, -i));
       }
       return days.map((dk) => {
         const done = tickets.filter((t) => t.status === "Completed" && t.dateCompleted === dk);
@@ -2348,10 +2375,8 @@ function ReportsView({ tickets, roster }) {
     }
     if (periodType === "range") return null; // trend line doesn't apply to an arbitrary custom range
     const months = [];
-    const base = new Date(month + "-01");
     for (let i = 5; i >= 0; i--) {
-      const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
-      months.push(d.toISOString().slice(0, 7));
+      months.push(shiftMonthKey(month, -i));
     }
     return months.map((mk) => {
       const done = tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk);
