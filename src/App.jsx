@@ -856,7 +856,7 @@ export default function CreativeOpsApp() {
             deleteReminder={deleteReminder}
           />
         )}
-        {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} />}
+        {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} tickets={tickets} />}
         {view === "board" && <BoardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "directory" && <DirectoryView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
@@ -908,6 +908,7 @@ export default function CreativeOpsApp() {
           onUpdate={updateTicket}
           onDelete={deleteTicket}
           setActiveTicket={setActiveTicket}
+          tickets={tickets}
         />
       )}
     </div>
@@ -1291,6 +1292,55 @@ function LeaderboardPanel({ tickets, roster }) {
   );
 }
 
+function WorkloadPanel({ roster, tickets, onOpen, setView }) {
+  const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+  const stats = members.map((m) => {
+    const mine = tickets.filter((t) => t.assignedTo === m.id && !CLOSED_STATUSES.includes(t.status));
+    const staticCount = mine.filter((t) => contentSuperType(t.contentType) === "Static").length;
+    const videoCount = mine.filter((t) => contentSuperType(t.contentType) === "Video").length;
+    return { member: m, total: mine.length, staticCount, videoCount };
+  });
+  const maxLoad = Math.max(1, ...stats.map((s) => s.total));
+  const avgLoad = stats.length ? stats.reduce((s, r) => s + r.total, 0) / stats.length : 0;
+
+  return (
+    <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <SectionTitle>Workload balance — current ongoing, by content type</SectionTitle>
+        <button onClick={() => setView("board")} className="text-[11px] font-semibold flex items-center gap-0.5" style={{ color: "var(--teal)" }}>Open Board <ChevronRight size={12} /></button>
+      </div>
+      <div className="mt-3 space-y-2">
+        {stats.map((s) => {
+          const overloaded = s.total > avgLoad * 1.5 && s.total >= 3;
+          const light = s.total < avgLoad * 0.5 && avgLoad > 1;
+          return (
+            <div key={s.member.id} className="flex items-center gap-3">
+              <Avatar member={s.member} size={26} />
+              <div className="w-20 flex-shrink-0 text-xs font-semibold truncate">{s.member.name}</div>
+              <div className="flex-1 h-4 rounded-full overflow-hidden flex" style={{ background: "var(--paper)" }}>
+                {s.total > 0 && (
+                  <>
+                    <div style={{ width: `${(s.staticCount / maxLoad) * 100}%`, background: "var(--teal)" }} title={`${s.staticCount} static`} />
+                    <div style={{ width: `${(s.videoCount / maxLoad) * 100}%`, background: "var(--amber)" }} title={`${s.videoCount} video`} />
+                  </>
+                )}
+              </div>
+              <div className="w-12 flex-shrink-0 text-xs font-black text-right" style={{ fontFamily: "var(--font-display)", color: overloaded ? "var(--coral)" : "var(--ink)" }}>{s.total}</div>
+              {overloaded && <AlertTriangle size={13} color="var(--coral)" className="flex-shrink-0" />}
+              {light && <span className="text-[10px] flex-shrink-0" style={{ color: "var(--teal)" }}>free</span>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-4 mt-3 text-[11px]" style={{ color: "var(--muted)" }}>
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "var(--teal)" }} /> Static</span>
+        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "var(--amber)" }} /> Video</span>
+        <span>Bars are relative to whoever currently has the most ongoing work.</span>
+      </div>
+    </div>
+  );
+}
+
 function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead, postAnnouncement, deleteAnnouncement, reminders, addReminder, deleteReminder }) {
   const open = tickets.filter((t) => !CLOSED_STATUSES.includes(t.status));
   const overdue = open.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < todayISO());
@@ -1333,6 +1383,7 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
       <AnnouncementsPanel announcements={announcements} isLead={isLead} postAnnouncement={postAnnouncement} deleteAnnouncement={deleteAnnouncement} />
       <RemindersPanel reminders={reminders} addReminder={addReminder} deleteReminder={deleteReminder} />
       <LeaderboardPanel tickets={tickets} roster={roster} />
+      <WorkloadPanel roster={roster} tickets={tickets} onOpen={onOpen} setView={setView} />
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Open tickets" value={open.length} icon={KanbanSquare} />
         <StatCard label="Overdue" value={overdue.length} icon={AlertTriangle} alert={overdue.length > 0} />
@@ -1494,7 +1545,7 @@ function EmptyState({ text }) {
   return <div className="text-sm py-6 text-center" style={{ color: "var(--muted)" }}>{text}</div>;
 }
 
-function NewRequestForm({ roster, currentUser, onCreate }) {
+function NewRequestForm({ roster, currentUser, onCreate, tickets }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [requesterNotes, setRequesterNotes] = useState("");
@@ -1511,6 +1562,7 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
   const [confirm, setConfirm] = useState(false);
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+  const ongoingCount = (memberId) => (tickets || []).filter((t) => t.assignedTo === memberId && !CLOSED_STATUSES.includes(t.status)).length;
 
   const togglePurpose = (p) => {
     setPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
@@ -1586,7 +1638,7 @@ function NewRequestForm({ roster, currentUser, onCreate }) {
       <Field label="Assign to (optional — can be assigned later on the Board)">
         <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
           <option value="">— Unassigned —</option>
-          {artists.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          {artists.map((m) => <option key={m.id} value={m.id}>{m.name} ({ongoingCount(m.id)} ongoing)</option>)}
         </select>
       </Field>
       <Field label="Inspiration image (optional)">
@@ -1840,7 +1892,7 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
   );
 }
 
-function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete, setActiveTicket }) {
+function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete, setActiveTicket, tickets }) {
   const [note, setNote] = useState("");
   const [revType, setRevType] = useState("minor");
   const [revCategory, setRevCategory] = useState(REVISION_CATEGORIES[0]);
@@ -1866,6 +1918,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   }, [ticket.id, ticket.hasImage]);
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
+  const ongoingCount = (memberId) => (tickets || []).filter((t) => t.assignedTo === memberId && t.id !== ticket.id && !CLOSED_STATUSES.includes(t.status)).length;
   const isAssignee = ticket.assignedTo === currentUser?.id;
   const isRequester = ticket.requestedBy === currentUser?.id;
   const canEdit = isLead || isRequester;
@@ -2065,7 +2118,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
               <div className="flex flex-wrap gap-2 mt-2">
                 <select defaultValue={ticket.assignedTo || ""} onChange={(e) => assign(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   <option value="">Unassigned</option>
-                  {artists.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  {artists.map((m) => <option key={m.id} value={m.id}>{m.name} ({ongoingCount(m.id)} ongoing)</option>)}
                 </select>
                 <select value={ticket.status} onChange={(e) => setStatus(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -2285,6 +2338,27 @@ function ReportsView({ tickets, roster }) {
   const orgAccs = completedInPeriod.map(ticketAccuracy).filter((a) => a !== null);
   const orgAvgAcc = orgAccs.length ? Math.round(orgAccs.reduce((a, b) => a + b, 0) / orgAccs.length) : null;
   const orgAvgRev = completedInPeriod.length ? completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0) / completedInPeriod.length : 0;
+
+  // Static vs Video transparency — so nobody has to guess whether they're
+  // quietly getting handed mostly one content type over another. Shown
+  // both for the selected period AND all-time, since a single month can
+  // look fine while the long-run pattern tells a different story.
+  const contentBreakdown = roster
+    .filter((m) => m.role === "Artist" || m.role === "Team Lead")
+    .map((m) => {
+      const assignedPeriod = requestedInPeriod.filter((t) => t.assignedTo === m.id);
+      const completedPeriod = completedInPeriod.filter((t) => t.assignedTo === m.id);
+      const assignedAll = tickets.filter((t) => t.assignedTo === m.id);
+      const completedAll = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed");
+      const count = (list, type) => list.filter((t) => contentSuperType(t.contentType) === type).length;
+      return {
+        name: m.name, id: m.id,
+        staticAssignedPeriod: count(assignedPeriod, "Static"), videoAssignedPeriod: count(assignedPeriod, "Video"),
+        staticCompletedPeriod: count(completedPeriod, "Static"), videoCompletedPeriod: count(completedPeriod, "Video"),
+        staticAssignedAll: count(assignedAll, "Static"), videoAssignedAll: count(assignedAll, "Video"),
+        staticCompletedAll: count(completedAll, "Static"), videoCompletedAll: count(completedAll, "Video"),
+      };
+    });
   const orgTotalUnits = completedInPeriod.reduce((s, t) => s + (t.units || 0), 0);
 
   // Previous-period comparison ("vs last month" / "vs yesterday") — only
@@ -2545,6 +2619,51 @@ function ReportsView({ tickets, roster }) {
                 <td className="py-1.5">{r.totalUnits}</td>
                 <td className="py-1.5">{r.avgRev}</td>
                 <td className="py-1.5">{r.avgAcc ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+        <SectionTitle>Static vs Video — assigned &amp; completed, per member</SectionTitle>
+        <div className="text-[11px] mt-1 mb-3" style={{ color: "var(--muted)" }}>Transparency check — so workload skew toward one content type (all-video, all-static) is visible, not just felt.</div>
+
+        <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>This period — {periodLabelReadable}</div>
+        <table className="w-full text-sm mb-4">
+          <thead>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+              <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {contentBreakdown.map((r) => (
+              <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                <td className="py-1.5 font-medium">{r.name}</td>
+                <td className="py-1.5">{r.staticAssignedPeriod}</td>
+                <td className="py-1.5">{r.staticCompletedPeriod}</td>
+                <td className="py-1.5">{r.videoAssignedPeriod}</td>
+                <td className="py-1.5">{r.videoCompletedPeriod}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>All-time</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+              <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {contentBreakdown.map((r) => (
+              <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                <td className="py-1.5 font-medium">{r.name}</td>
+                <td className="py-1.5">{r.staticAssignedAll}</td>
+                <td className="py-1.5">{r.staticCompletedAll}</td>
+                <td className="py-1.5">{r.videoAssignedAll}</td>
+                <td className="py-1.5">{r.videoCompletedAll}</td>
               </tr>
             ))}
           </tbody>
