@@ -1257,14 +1257,19 @@ function LeaderboardPanel({ tickets, roster }) {
   const stats = members.map((m) => {
     const done = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed" && monthKey(t.dateCompleted) === thisMonth);
     const completed = done.length;
-    const units = done.reduce((s, t) => s + (t.units || 0), 0);
+    const completedPts = workloadPoints(done);
     const accs = done.map(ticketAccuracy).filter((a) => a !== null);
     const avgAcc = accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : 0;
     const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
-    // Same idea as before — completions and units drive the score up,
-    // accuracy nudges it further, and revisions pull it back down.
-    const score = completed * 10 + units * 2 + avgAcc / 5 - avgRev * 5;
-    return { member: m, completed, units, avgAcc: Math.round(avgAcc), avgRev: Number(avgRev.toFixed(2)), score };
+    // Recalibrated around the workload-point system: complexity-weighted
+    // completed points now drive the score (replacing the blunter
+    // "completed count + units" combo), accuracy nudges it further, and
+    // revisions pull it back down. Deliberately uses COMPLETED points, not
+    // assigned — assigned points reflect the Team Lead's distribution
+    // choice, not the person's own performance, so only what they actually
+    // delivered (weighted by real complexity) counts toward rank.
+    const score = completedPts * 10 + avgAcc / 5 - avgRev * 8;
+    return { member: m, completed, completedPts, avgAcc: Math.round(avgAcc), avgRev: Number(avgRev.toFixed(2)), score };
   });
   const scores = stats.map((s) => s.score);
   const maxScore = Math.max(...scores, 0);
@@ -1299,10 +1304,10 @@ function LeaderboardPanel({ tickets, roster }) {
                 </div>
                 <div className="text-[11px] flex flex-wrap gap-x-3 mt-0.5" style={{ color: "var(--muted)" }}>
                   <span>{r.completed} completed</span>
-                  <span>{r.units} units</span>
+                  <span>{r.completedPts} workload pts</span>
                   <span>{r.avgAcc}% accuracy</span>
                   <span>{r.avgRev} avg revisions</span>
-                  <span className="font-semibold" style={{ color: "var(--ink)" }}>{Math.round(r.score)} pts</span>
+                  <span className="font-semibold" style={{ color: "var(--ink)" }}>{Math.round(r.score)} score</span>
                 </div>
               </div>
             </div>
