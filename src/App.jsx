@@ -150,9 +150,18 @@ function mostLikedTrack(tracks) {
 
 // Tickets without a set complexity default to 1 point (a conservative
 // "very simple" assumption) so older tickets from before this feature
-// existed don't just silently count as zero load.
-function workloadPoints(list) {
-  return list.reduce((sum, t) => sum + (t.complexity ?? 1), 0);
+// existed don't just silently count as zero load. mode="estimated" (the
+// default) is what drives load-balancing decisions — set at assignment,
+// before anyone knows how a project will actually go. mode="actual" is
+// what drives performance/leaderboard numbers — confirmed at completion,
+// falling back to the estimate if the Team Lead never adjusted it.
+function workloadPoints(list, mode = "estimated") {
+  return list.reduce((sum, t) => {
+    const val = mode === "actual"
+      ? (t.actualComplexity ?? t.estimatedComplexity ?? t.complexity ?? 1)
+      : (t.estimatedComplexity ?? t.complexity ?? 1);
+    return sum + val;
+  }, 0);
 }
 
 function revisionEquivalent(ticket) {
@@ -789,6 +798,8 @@ export default function CreativeOpsApp() {
       revisionRequests: [],
       units: null,
       complexity: null,
+      estimatedComplexity: null,
+      actualComplexity: null,
       referenceLink: "",
       satisfactionScore: null,
       briefCompliance: null,
@@ -1257,7 +1268,7 @@ function LeaderboardPanel({ tickets, roster }) {
   const stats = members.map((m) => {
     const done = tickets.filter((t) => t.assignedTo === m.id && t.status === "Completed" && monthKey(t.dateCompleted) === thisMonth);
     const completed = done.length;
-    const completedPts = workloadPoints(done);
+    const completedPts = workloadPoints(done, "actual");
     const accs = done.map(ticketAccuracy).filter((a) => a !== null);
     const avgAcc = accs.length ? accs.reduce((a, b) => a + b, 0) / accs.length : 0;
     const avgRev = done.length ? done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length : 0;
@@ -1319,55 +1330,85 @@ function LeaderboardPanel({ tickets, roster }) {
   );
 }
 
-function WorkloadPanel({ roster, tickets, onOpen, setView }) {
+// Shared suitability ranking used by both the Dashboard balancer panel and
+// the inline suggestion in the New Request form, so the two never disagree.
+function suggestAssignees(roster, tickets, contentType) {
   const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const stats = members.map((m) => {
     const mine = tickets.filter((t) => t.assignedTo === m.id && !CLOSED_STATUSES.includes(t.status));
-    const staticTickets = mine.filter((t) => contentSuperType(t.contentType) === "Static");
-    const videoTickets = mine.filter((t) => contentSuperType(t.contentType) === "Video");
-    const staticPts = workloadPoints(staticTickets);
-    const videoPts = workloadPoints(videoTickets);
-    return { member: m, total: mine.length, points: staticPts + videoPts, staticPts, videoPts };
+    const staticPts = workloadPoints(mine.filter((t) => contentSuperType(t.contentType) === "Static"));
+    const videoPts = workloadPoints(mine.filter((t) => contentSuperType(t.contentType) === "Video"));
+    return { member: m, totalPts: staticPts + videoPts, staticPts, videoPts, total: mine.length, skew: videoPts - staticPts };
   });
-  const maxPoints = Math.max(1, ...stats.map((s) => s.points));
-  const avgPoints = stats.length ? stats.reduce((s, r) => s + r.points, 0) / stats.length : 0;
+  const maxPts = Math.max(1, ...stats.map((s) => s.totalPts));
+  return stats
+    .map((s) => {
+      const loadScore = s.totalPts / maxPts; // 0..1, lower is better
+      const mixAdjustment = contentType === "Video" ? s.skew : -s.skew; // higher = less suitable for this type
+      const suitability = loadScore * 10 + mixAdjustment * 0.5;
+      let reason = "lightest current load";
+      if (contentType === "Video" && s.skew < -1) reason = "mostly static lately — this balances their mix";
+      else if (contentType === "Static" && s.skew > 1) reason = "mostly video lately — this balances their mix";
+      else if (s.total === 0) reason = "no current workload";
+      return { ...s, suitability, reason };
+    })
+    .sort((a, b) => a.suitability - b.suitability);
+}
+
+function AssignmentBalancer({ roster, tickets, setView }) {
+  const [nextType, setNextType] = useState("Static");
+  const ranked = suggestAssignees(roster, tickets, nextType);
 
   return (
     <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <SectionTitle>Workload balance — weighted by complexity points, by content type</SectionTitle>
+        <SectionTitle>Assignment balancer — who should get the next request</SectionTitle>
         <button onClick={() => setView("board")} className="text-[11px] font-semibold flex items-center gap-0.5" style={{ color: "var(--teal)" }}>Open Board <ChevronRight size={12} /></button>
       </div>
-      <div className="mt-3 space-y-2">
-        {stats.map((s) => {
-          const overloaded = s.points > avgPoints * 1.5 && s.points >= 3;
-          const light = s.points < avgPoints * 0.5 && avgPoints > 1;
-          return (
-            <div key={s.member.id} className="flex items-center gap-3">
-              <Avatar member={s.member} size={26} />
-              <div className="w-20 flex-shrink-0 text-xs font-semibold truncate">{s.member.name}</div>
-              <div className="flex-1 h-4 rounded-full overflow-hidden flex" style={{ background: "var(--paper)" }}>
-                {s.points > 0 && (
-                  <>
-                    <div style={{ width: `${(s.staticPts / maxPoints) * 100}%`, background: "var(--teal)" }} title={`${s.staticPts} static pts`} />
-                    <div style={{ width: `${(s.videoPts / maxPoints) * 100}%`, background: "var(--amber)" }} title={`${s.videoPts} video pts`} />
-                  </>
-                )}
-              </div>
-              <div className="w-20 flex-shrink-0 text-right">
-                <div className="text-xs font-black" style={{ fontFamily: "var(--font-display)", color: overloaded ? "var(--coral)" : "var(--ink)" }}>{s.points} pts</div>
-                <div className="text-[10px]" style={{ color: "var(--muted)" }}>{s.total} projects</div>
-              </div>
-              {overloaded && <AlertTriangle size={13} color="var(--coral)" className="flex-shrink-0" />}
-              {light && <span className="text-[10px] flex-shrink-0" style={{ color: "var(--teal)" }}>free</span>}
-            </div>
-          );
-        })}
+      <div className="flex items-center gap-2 mt-2 mb-3">
+        <span className="text-[11px]" style={{ color: "var(--muted)" }}>Next request:</span>
+        <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
+          <button onClick={() => setNextType("Static")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: nextType === "Static" ? "var(--ink)" : "white", color: nextType === "Static" ? "white" : "var(--ink)" }}>Static</button>
+          <button onClick={() => setNextType("Video")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: nextType === "Video" ? "var(--ink)" : "white", color: nextType === "Video" ? "white" : "var(--ink)" }}>Video</button>
+        </div>
       </div>
-      <div className="flex items-center gap-4 mt-3 text-[11px]" style={{ color: "var(--muted)" }}>
-        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "var(--teal)" }} /> Static</span>
-        <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: "var(--amber)" }} /> Video</span>
-        <span>Bars are relative to whoever currently holds the most workload points. Untagged tickets assume 1 point.</span>
+
+      {ranked.length === 0 ? (
+        <EmptyState text="No artists in the roster yet." />
+      ) : (
+        <>
+          <div className="rounded-md p-3 mb-3 flex items-center gap-2" style={{ background: "rgba(46,107,96,0.12)" }}>
+            <CheckCircle2 size={16} color="var(--teal)" className="flex-shrink-0" />
+            <div>
+              <div className="text-xs font-bold" style={{ color: "var(--teal)" }}>Recommended — {ranked[0].member.name}</div>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{ranked[0].reason}</div>
+            </div>
+          </div>
+
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left" style={{ color: "var(--muted)" }}>
+                <th className="pb-1.5 font-normal">Member</th><th className="pb-1.5 font-normal">Current load</th><th className="pb-1.5 font-normal">Mix</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.map((r, i) => (
+                <tr key={r.member.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                  <td className="py-1.5"><div className="flex items-center gap-2"><Avatar member={r.member} size={20} /> {r.member.name}</div></td>
+                  <td className="py-1.5">{r.totalPts} pts</td>
+                  <td className="py-1.5" style={{ color: "var(--muted)" }}>{r.skew > 1 ? "mostly video" : r.skew < -1 ? "mostly static" : "balanced"}</td>
+                  <td className="py-1.5 text-right">
+                    {i === 0 && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "rgba(46,107,96,0.15)", color: "var(--teal)" }}>best fit</span>}
+                    {i === ranked.length - 1 && ranked.length > 1 && r.totalPts > 0 && <span className="text-[10px]" style={{ color: "var(--coral)" }}>heaviest</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+      <div className="text-[10px] mt-3" style={{ color: "var(--muted)" }}>
+        Based on current workload points and content-type mix only — urgency, skill, and availability are still yours to judge.
       </div>
     </div>
   );
@@ -1382,10 +1423,6 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
     .flatMap((t) => t.history.map((h) => ({ ...h, ticket: t })))
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, 8);
-  const recentlyClosed = tickets
-    .filter((t) => CLOSED_STATUSES.includes(t.status))
-    .sort((a, b) => new Date(b.history[b.history.length - 1]?.date || 0) - new Date(a.history[a.history.length - 1]?.date || 0))
-    .slice(0, 4);
 
   const members = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const memberStats = members.map((m) => {
@@ -1412,10 +1449,6 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
 
   return (
     <div className="space-y-6">
-      <AnnouncementsPanel announcements={announcements} isLead={isLead} postAnnouncement={postAnnouncement} deleteAnnouncement={deleteAnnouncement} />
-      <RemindersPanel reminders={reminders} addReminder={addReminder} deleteReminder={deleteReminder} />
-      <LeaderboardPanel tickets={tickets} roster={roster} />
-      <WorkloadPanel roster={roster} tickets={tickets} onOpen={onOpen} setView={setView} />
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Open tickets" value={open.length} icon={KanbanSquare} />
         <StatCard label="Overdue" value={overdue.length} icon={AlertTriangle} alert={overdue.length > 0} />
@@ -1425,20 +1458,24 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
         <StatCard label="Units this month" value={unitsThisMonth} icon={Pencil} trendPct={unitsPct} />
       </div>
 
+      <div>
+        <div className="text-xs font-bold uppercase tracking-widest mb-2" style={{ color: "var(--muted)" }}>Team performance</div>
+        <div className="grid md:grid-cols-2 gap-4">
+          <LeaderboardPanel tickets={tickets} roster={roster} />
+          <AssignmentBalancer roster={roster} tickets={tickets} setView={setView} />
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <StatCard label="Completed total" value={tickets.filter((t) => t.status === "Completed").length} icon={CheckCircle2} />
         <StatCard label="Units last month" value={unitsLastMonth} icon={Pencil} />
         <StatCard label="Units all-time" value={tickets.filter((t) => t.status === "Completed").reduce((s, t) => s + (t.units || 0), 0)} icon={Pencil} />
       </div>
 
-      {recentlyClosed.length > 0 && (
-        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-          <SectionTitle>Recently completed / cancelled — click to reopen or review</SectionTitle>
-          <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-            {recentlyClosed.map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
-          </div>
-        </div>
-      )}
+      <div>
+        <div className="text-xs font-bold uppercase tracking-widest mb-2" style={{ color: "var(--muted)" }}>Live requests</div>
+        <RequestsPanel tickets={tickets} roster={roster} onOpen={onOpen} />
+      </div>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
         <SectionTitle>Ongoing, completed & overdue — per team member</SectionTitle>
@@ -1467,19 +1504,24 @@ function DashboardView({ tickets, roster, onOpen, setView, announcements, isLead
         </table>
       </div>
 
-      <RequestsPanel tickets={tickets} roster={roster} onOpen={onOpen} />
-
-      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Recent activity</SectionTitle>
-        <div className="mt-3 grid sm:grid-cols-2 gap-x-6">
-          {recent.length === 0 && <EmptyState text="No activity yet." />}
-          {recent.map((h, i) => (
-              <div key={i} className="text-xs">
-                <div className="font-semibold">{h.action}</div>
-                <div style={{ color: "var(--muted)" }}>JOB-{String(h.ticket.ticketNo).padStart(4, "0")} · {h.by} · {new Date(h.date).toLocaleDateString()}</div>
-              </div>
-            ))}
+      <div>
+        <div className="text-xs font-bold uppercase tracking-widest mb-2" style={{ color: "var(--muted)" }}>Team pulse</div>
+        <div className="grid md:grid-cols-3 gap-4">
+          <AnnouncementsPanel announcements={announcements} isLead={isLead} postAnnouncement={postAnnouncement} deleteAnnouncement={deleteAnnouncement} />
+          <RemindersPanel reminders={reminders} addReminder={addReminder} deleteReminder={deleteReminder} />
+          <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+            <SectionTitle>Recent activity</SectionTitle>
+            <div className="mt-3 space-y-2">
+              {recent.length === 0 && <EmptyState text="No activity yet." />}
+              {recent.slice(0, 5).map((h, i) => (
+                <div key={i} className="text-xs">
+                  <div className="font-semibold">{h.action}</div>
+                  <div style={{ color: "var(--muted)" }}>JOB-{String(h.ticket.ticketNo).padStart(4, "0")} · {h.by} · {new Date(h.date).toLocaleDateString()}</div>
+                </div>
+              ))}
+            </div>
           </div>
+        </div>
       </div>
     </div>
   );
@@ -1595,6 +1637,7 @@ function NewRequestForm({ roster, currentUser, onCreate, tickets }) {
 
   const artists = roster.filter((m) => m.role === "Artist" || m.role === "Team Lead");
   const ongoingFor = (memberId) => (tickets || []).filter((t) => t.assignedTo === memberId && !CLOSED_STATUSES.includes(t.status));
+  const suggested = suggestAssignees(roster, tickets || [], contentSuperType(contentType))[0];
 
   const togglePurpose = (p) => {
     setPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
@@ -1668,6 +1711,11 @@ function NewRequestForm({ roster, currentUser, onCreate, tickets }) {
         </div>
       </Field>
       <Field label="Assign to (optional — can be assigned later on the Board)">
+        {suggested && !assignedTo && (
+          <button type="button" onClick={() => setAssignedTo(suggested.member.id)} className="flex items-center gap-1.5 text-xs mb-1.5" style={{ color: "var(--teal)" }}>
+            <CheckCircle2 size={12} /> Suggested: {suggested.member.name} — {suggested.reason}
+          </button>
+        )}
         <select value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} className="w-full border rounded px-3 py-2 text-sm" style={{ borderColor: "var(--line)" }}>
           <option value="">— Unassigned —</option>
           {artists.map((m) => <option key={m.id} value={m.id}>{m.name} ({ongoingFor(m.id).length} ongoing · {workloadPoints(ongoingFor(m.id))} pts)</option>)}
@@ -1934,6 +1982,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   const [imageUrl, setImageUrl] = useState(null);
   const [revisionPoint, setRevisionPoint] = useState("");
   const [unitsInput, setUnitsInput] = useState(ticket.units || "");
+  const [actualComplexityInput, setActualComplexityInput] = useState(ticket.actualComplexity ?? ticket.estimatedComplexity ?? ticket.complexity ?? "");
   const [refLinkInput, setRefLinkInput] = useState(ticket.referenceLink || "");
 
   const [eTitle, setETitle] = useState(ticket.title);
@@ -1970,9 +2019,13 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
     if (CLOSED_STATUSES.includes(status) && ticket.assignedTo) clearFocusIfMine(ticket.assignedTo);
     onUpdate(ticket.id, Object.assign((t) => ({ ...t, status }), { __label: `Status → ${status}` }));
   };
-  const setComplexity = (points) => {
+  const setEstimatedComplexity = (points) => {
     const tier = COMPLEXITY_SCALE.find((c) => c.points === points);
-    onUpdate(ticket.id, Object.assign((t) => ({ ...t, complexity: points }), { __label: `Workload complexity set to ${points} (${tier?.label})` }));
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, estimatedComplexity: points }), { __label: `Estimated workload set to ${points} (${tier?.label})` }));
+  };
+  const setActualComplexity = (points) => {
+    const tier = COMPLEXITY_SCALE.find((c) => c.points === points);
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, actualComplexity: points }), { __label: `Actual workload confirmed at ${points} (${tier?.label})` }));
   };
   const addRevision = () => {
     if (!note.trim()) return;
@@ -2009,7 +2062,8 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   };
   const complete = () => {
     if (ticket.assignedTo) clearFocusIfMine(ticket.assignedTo);
-    onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO() }), { __label: "Approved & completed" }));
+    const finalActual = ticket.actualComplexity ?? ticket.estimatedComplexity ?? ticket.complexity ?? 1;
+    onUpdate(ticket.id, Object.assign((t) => ({ ...t, status: "Completed", dateCompleted: todayISO(), actualComplexity: finalActual }), { __label: "Approved & completed" }));
   };
   const reopen = () => {
     const wasCompleted = ticket.status === "Completed";
@@ -2161,15 +2215,15 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                 </select>
               </div>
               <div className="mt-3">
-                <div className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Workload complexity (0–5)</div>
-                <select value={ticket.complexity ?? ""} onChange={(e) => setComplexity(Number(e.target.value))} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
+                <div className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Estimated workload (0–5) — for balancing assignments</div>
+                <select value={ticket.estimatedComplexity ?? ticket.complexity ?? ""} onChange={(e) => setEstimatedComplexity(Number(e.target.value))} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   <option value="" disabled>Not set yet</option>
                   {COMPLEXITY_SCALE.map((c) => <option key={c.points} value={c.points}>{c.points} — {c.label}</option>)}
                 </select>
                 <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-                  {ticket.complexity !== null && ticket.complexity !== undefined
-                    ? COMPLEXITY_SCALE.find((c) => c.points === ticket.complexity)?.desc
-                    : "For balancing assignments — set once, doesn't change with revisions."}
+                  {(ticket.estimatedComplexity ?? ticket.complexity) !== null && (ticket.estimatedComplexity ?? ticket.complexity) !== undefined
+                    ? COMPLEXITY_SCALE.find((c) => c.points === (ticket.estimatedComplexity ?? ticket.complexity))?.desc
+                    : "A quick up-front guess — doesn't change with revisions, and can turn out different from the actual once the work is done."}
                 </div>
               </div>
             </div>
@@ -2263,6 +2317,19 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                 {ticket.referenceLink && <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Currently: {ticket.referenceLink}</div>}
               </div>
 
+              <div className="mt-3">
+                <SectionTitle>Confirm actual workload (0–5) — defaults to the estimate</SectionTitle>
+                <div className="flex gap-2 mt-2 items-center">
+                  <select value={actualComplexityInput} onChange={(e) => setActualComplexityInput(Number(e.target.value))} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
+                    <option value="" disabled>Not set</option>
+                    {COMPLEXITY_SCALE.map((c) => <option key={c.points} value={c.points}>{c.points} — {c.label}</option>)}
+                  </select>
+                  <button onClick={() => setActualComplexity(Number(actualComplexityInput))} disabled={actualComplexityInput === ""} className="px-2 py-1 rounded text-white text-xs font-semibold disabled:opacity-40" style={{ background: "var(--ink)" }}>Confirm</button>
+                  {ticket.actualComplexity !== null && ticket.actualComplexity !== undefined && <span className="text-xs" style={{ color: "var(--muted)" }}>Confirmed: {ticket.actualComplexity}</span>}
+                </div>
+                <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Adjust only if it genuinely turned out more or less complex than expected — this is what feeds the leaderboard and completed-workload reports.</div>
+              </div>
+
               <button
                 onClick={complete}
                 disabled={!ticket.units || !ticket.referenceLink}
@@ -2351,23 +2418,39 @@ function StarRow({ value, onChange }) {
 function ReportsView({ tickets, roster }) {
   const reportRef = useRef(null);
   const [reportTab, setReportTab] = useState("completed"); // "completed" | "ongoing"
-  const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "daily" | "range"
+  const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "weekly" | "daily" | "range"
   const [month, setMonth] = useState(monthKey(todayISO()));
   const [day, setDay] = useState(todayISO());
+  const [weekStart, setWeekStart] = useState(() => {
+    const d = new Date();
+    const dow = d.getDay(); // 0=Sun..6=Sat
+    const diffToMonday = dow === 0 ? 6 : dow - 1;
+    return shiftDayKey(todayISO(), -diffToMonday);
+  });
   const [rangeStart, setRangeStart] = useState(todayISO());
   const [rangeEnd, setRangeEnd] = useState(todayISO());
   const [exportingPdf, setExportingPdf] = useState(false);
   const [purposeChartType, setPurposeChartType] = useState("pie"); // "pie" | "bar"
   const [categoryChartType, setCategoryChartType] = useState("bar"); // "bar" | "pie"
+  const [metricTab, setMetricTab] = useState("overview"); // "overview" | "workload" | "content"
+
+  const weekEnd = shiftDayKey(weekStart, 6);
+  const pickWeekFor = (dateStr) => {
+    const d = new Date(dateStr + "T00:00:00");
+    const dow = d.getDay();
+    const diffToMonday = dow === 0 ? 6 : dow - 1;
+    setWeekStart(shiftDayKey(dateStr, -diffToMonday));
+  };
 
   const inPeriod = (dateStr) => {
     if (!dateStr) return false;
     if (periodType === "monthly") return monthKey(dateStr) === month;
+    if (periodType === "weekly") return dateStr >= weekStart && dateStr <= weekEnd;
     if (periodType === "daily") return dateStr === day;
     return dateStr >= rangeStart && dateStr <= rangeEnd;
   };
-  const periodLabel = periodType === "monthly" ? month : periodType === "daily" ? day : `${rangeStart}_to_${rangeEnd}`;
-  const periodLabelReadable = periodType === "monthly" ? month : periodType === "daily" ? day : `${rangeStart} to ${rangeEnd}`;
+  const periodLabel = periodType === "monthly" ? month : periodType === "weekly" ? `${weekStart}_to_${weekEnd}` : periodType === "daily" ? day : `${rangeStart}_to_${rangeEnd}`;
+  const periodLabelReadable = periodType === "monthly" ? month : periodType === "weekly" ? `${weekStart} to ${weekEnd}` : periodType === "daily" ? day : `${rangeStart} to ${rangeEnd}`;
 
   const completedInPeriod = tickets.filter((t) => t.status === "Completed" && inPeriod(t.dateCompleted));
   const requestedInPeriod = tickets.filter((t) => inPeriod(t.dateRequested));
@@ -2412,8 +2495,8 @@ function ReportsView({ tickets, roster }) {
   // Workload points — separate from units/quality on purpose. Revisions
   // never add points here; they're tracked as their own quality signal.
   const assignedInPeriod = requestedInPeriod.filter((t) => t.assignedTo);
-  const assignedPointsOrg = workloadPoints(assignedInPeriod);
-  const completedPointsOrg = workloadPoints(completedInPeriod);
+  const assignedPointsOrg = workloadPoints(assignedInPeriod, "estimated");
+  const completedPointsOrg = workloadPoints(completedInPeriod, "actual");
   const completedNeedingRevision = completedInPeriod.filter((t) => (t.revisions || []).length > 0);
   const revisionRatePct = completedInPeriod.length ? Math.round((completedNeedingRevision.length / completedInPeriod.length) * 100) : 0;
   const workloadByMember = roster
@@ -2423,8 +2506,8 @@ function ReportsView({ tickets, roster }) {
       const completedPeriod = completedInPeriod.filter((t) => t.assignedTo === m.id);
       return {
         name: m.name, id: m.id,
-        assignedPts: workloadPoints(assignedPeriod),
-        completedPts: workloadPoints(completedPeriod),
+        assignedPts: workloadPoints(assignedPeriod, "estimated"),
+        completedPts: workloadPoints(completedPeriod, "actual"),
         needingRevision: completedPeriod.filter((t) => (t.revisions || []).length > 0).length,
         completedCount: completedPeriod.length,
       };
@@ -2433,13 +2516,22 @@ function ReportsView({ tickets, roster }) {
   // Previous-period comparison ("vs last month" / "vs yesterday") — only
   // meaningful for monthly/daily modes, since a custom range has no fixed
   // equivalent "previous" range to compare against.
+  const prevWeekStart = shiftDayKey(weekStart, -7);
+  const prevWeekEnd = shiftDayKey(weekEnd, -7);
   const prevPeriodKey = periodType === "monthly"
     ? shiftMonthKey(month, -1)
+    : periodType === "weekly"
+    ? prevWeekStart
     : periodType === "daily"
     ? shiftDayKey(day, -1)
     : null;
   const completedInPrevPeriod = prevPeriodKey
-    ? tickets.filter((t) => t.status === "Completed" && (periodType === "monthly" ? monthKey(t.dateCompleted) === prevPeriodKey : t.dateCompleted === prevPeriodKey))
+    ? tickets.filter((t) => {
+        if (t.status !== "Completed") return false;
+        if (periodType === "monthly") return monthKey(t.dateCompleted) === prevPeriodKey;
+        if (periodType === "weekly") return t.dateCompleted >= prevWeekStart && t.dateCompleted <= prevWeekEnd;
+        return t.dateCompleted === prevPeriodKey;
+      })
     : [];
   const prevAccs = completedInPrevPeriod.map(ticketAccuracy).filter((a) => a !== null);
   const prevAvgAcc = prevAccs.length ? Math.round(prevAccs.reduce((a, b) => a + b, 0) / prevAccs.length) : null;
@@ -2450,7 +2542,7 @@ function ReportsView({ tickets, roster }) {
     if (!prev) return curr > 0 ? 100 : 0;
     return Math.round(((curr - prev) / prev) * 100);
   };
-  const trendLabel = periodType === "daily" ? "vs yesterday" : "vs last month";
+  const trendLabel = periodType === "daily" ? "vs yesterday" : periodType === "weekly" ? "vs last week" : "vs last month";
 
   // Revision category analytics — every revision logged in the period,
   // across all tickets (not just completed ones), grouped by category.
@@ -2516,6 +2608,22 @@ function ReportsView({ tickets, roster }) {
         };
       });
     }
+    if (periodType === "weekly") {
+      const days = [];
+      for (let i = 13; i >= 0; i--) {
+        days.push(shiftDayKey(weekEnd, -i));
+      }
+      return days.map((dk) => {
+        const done = tickets.filter((t) => t.status === "Completed" && t.dateCompleted === dk);
+        const accs = done.map(ticketAccuracy).filter((a) => a !== null);
+        return {
+          label: dk.slice(5),
+          completed: done.length,
+          accuracy: accs.length ? Math.round(accs.reduce((a, b) => a + b, 0) / accs.length) : null,
+          avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
+        };
+      });
+    }
     if (periodType === "range") return null; // trend line doesn't apply to an arbitrary custom range
     const months = [];
     for (let i = 5; i >= 0; i--) {
@@ -2531,7 +2639,7 @@ function ReportsView({ tickets, roster }) {
         avgRevisions: done.length ? Number((done.reduce((s, t) => s + revisionEquivalent(t), 0) / done.length).toFixed(2)) : null,
       };
     });
-  }, [tickets, month, day, periodType]);
+  }, [tickets, month, day, weekEnd, periodType]);
 
   const priorityBreakdown = PRIORITIES.map((p) => ({ name: p, value: tickets.filter((t) => t.priority === p && t.status !== "Completed").length }));
 
@@ -2638,12 +2746,19 @@ function ReportsView({ tickets, roster }) {
       <div className="flex flex-wrap items-center gap-3">
         <SectionTitle>Report period</SectionTitle>
         <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
-          <button onClick={() => setPeriodType("monthly")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "monthly" ? "var(--ink)" : "white", color: periodType === "monthly" ? "white" : "var(--ink)" }}>Monthly</button>
           <button onClick={() => setPeriodType("daily")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "daily" ? "var(--ink)" : "white", color: periodType === "daily" ? "white" : "var(--ink)" }}>Daily</button>
+          <button onClick={() => setPeriodType("weekly")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "weekly" ? "var(--ink)" : "white", color: periodType === "weekly" ? "white" : "var(--ink)" }}>Weekly</button>
+          <button onClick={() => setPeriodType("monthly")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "monthly" ? "var(--ink)" : "white", color: periodType === "monthly" ? "white" : "var(--ink)" }}>Monthly</button>
           <button onClick={() => setPeriodType("range")} className="px-3 py-1 text-xs font-semibold" style={{ background: periodType === "range" ? "var(--ink)" : "white", color: periodType === "range" ? "white" : "var(--ink)" }}>Custom Range</button>
         </div>
         {periodType === "monthly" && (
           <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+        )}
+        {periodType === "weekly" && (
+          <div className="flex items-center gap-1.5 text-sm">
+            <input type="date" value={weekStart} onChange={(e) => pickWeekFor(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
+            <span style={{ color: "var(--muted)" }}>week of {weekStart} – {weekEnd}</span>
+          </div>
         )}
         {periodType === "daily" && (
           <input type="date" value={day} onChange={(e) => setDay(e.target.value)} className="border rounded px-2 py-1 text-sm" style={{ borderColor: "var(--line)" }} />
@@ -2673,101 +2788,113 @@ function ReportsView({ tickets, roster }) {
       </div>
 
       <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Per team member — {periodLabelReadable}</SectionTitle>
-        <table className="w-full text-sm mt-3">
-          <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Completed</th><th className="pb-2">Units</th><th className="pb-2">Avg revisions (major-eq.)</th><th className="pb-2">Avg accuracy</th>
-            </tr>
-          </thead>
-          <tbody>
-            {perArtist.map((r) => (
-              <tr key={r.name} className="border-t" style={{ borderColor: "var(--line)" }}>
-                <td className="py-1.5 font-medium">{r.name}</td>
-                <td className="py-1.5">{r.completed}</td>
-                <td className="py-1.5">{r.totalUnits}</td>
-                <td className="py-1.5">{r.avgRev}</td>
-                <td className="py-1.5">{r.avgAcc ?? "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Workload points — {periodLabelReadable}</SectionTitle>
-        <div className="text-[11px] mt-1 mb-3" style={{ color: "var(--muted)" }}>
-          Fixed 0–5 complexity scale, set by Team Lead at assignment — not tied to Static/Video, and revisions never add points here (tracked separately as quality, below).
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <SectionTitle>Per team member — {periodLabelReadable}</SectionTitle>
+          <div className="flex border rounded overflow-hidden" style={{ borderColor: "var(--line)" }}>
+            <button onClick={() => setMetricTab("overview")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: metricTab === "overview" ? "var(--ink)" : "white", color: metricTab === "overview" ? "white" : "var(--ink)" }}>Overview</button>
+            <button onClick={() => setMetricTab("workload")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: metricTab === "workload" ? "var(--ink)" : "white", color: metricTab === "workload" ? "white" : "var(--ink)" }}>Workload</button>
+            <button onClick={() => setMetricTab("content")} className="px-2.5 py-1 text-xs font-semibold" style={{ background: metricTab === "content" ? "var(--ink)" : "white", color: metricTab === "content" ? "white" : "var(--ink)" }}>Content type</button>
+          </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-          <StatCard label="Assigned workload" value={`${assignedPointsOrg} pts`} icon={Flag} />
-          <StatCard label="Completed workload" value={`${completedPointsOrg} pts`} icon={CheckCircle2} />
-          <StatCard label="Needed revision (quality)" value={`${completedNeedingRevision.length} of ${completedInPeriod.length} (${revisionRatePct}%)`} icon={Pencil} />
-        </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Assigned pts</th><th className="pb-2">Completed pts</th><th className="pb-2">Completed</th><th className="pb-2">Needed revision</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workloadByMember.map((r) => (
-              <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
-                <td className="py-1.5 font-medium">{r.name}</td>
-                <td className="py-1.5">{r.assignedPts}</td>
-                <td className="py-1.5">{r.completedPts}</td>
-                <td className="py-1.5">{r.completedCount}</td>
-                <td className="py-1.5">{r.needingRevision}</td>
+
+        {metricTab === "overview" && (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                <th className="pb-2">Name</th><th className="pb-2">Completed</th><th className="pb-2">Units</th><th className="pb-2">Avg revisions (major-eq.)</th><th className="pb-2">Avg accuracy</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {perArtist.map((r) => (
+                <tr key={r.name} className="border-t" style={{ borderColor: "var(--line)" }}>
+                  <td className="py-1.5 font-medium">{r.name}</td>
+                  <td className="py-1.5">{r.completed}</td>
+                  <td className="py-1.5">{r.totalUnits}</td>
+                  <td className="py-1.5">{r.avgRev}</td>
+                  <td className="py-1.5">{r.avgAcc ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {metricTab === "workload" && (
+          <>
+            <div className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>
+              Assigned = estimated at assignment. Completed = confirmed actual once the work is done. Revisions never add points here — tracked separately as quality.
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+              <StatCard label="Assigned workload (est.)" value={`${assignedPointsOrg} pts`} icon={Flag} />
+              <StatCard label="Completed workload (actual)" value={`${completedPointsOrg} pts`} icon={CheckCircle2} />
+              <StatCard label="Needed revision (quality)" value={`${completedNeedingRevision.length} of ${completedInPeriod.length} (${revisionRatePct}%)`} icon={Pencil} />
+            </div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                  <th className="pb-2">Name</th><th className="pb-2">Assigned pts (est.)</th><th className="pb-2">Completed pts (actual)</th><th className="pb-2">Completed</th><th className="pb-2">Needed revision</th>
+                </tr>
+              </thead>
+              <tbody>
+                {workloadByMember.map((r) => (
+                  <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                    <td className="py-1.5 font-medium">{r.name}</td>
+                    <td className="py-1.5">{r.assignedPts}</td>
+                    <td className="py-1.5">{r.completedPts}</td>
+                    <td className="py-1.5">{r.completedCount}</td>
+                    <td className="py-1.5">{r.needingRevision}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+
+        {metricTab === "content" && (
+          <>
+            <div className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>Transparency check — so workload skew toward one content type (all-video, all-static) is visible, not just felt.</div>
+            <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>This period — {periodLabelReadable}</div>
+            <table className="w-full text-sm mb-4">
+              <thead>
+                <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                  <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contentBreakdown.map((r) => (
+                  <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                    <td className="py-1.5 font-medium">{r.name}</td>
+                    <td className="py-1.5">{r.staticAssignedPeriod}</td>
+                    <td className="py-1.5">{r.staticCompletedPeriod}</td>
+                    <td className="py-1.5">{r.videoAssignedPeriod}</td>
+                    <td className="py-1.5">{r.videoCompletedPeriod}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>All-time</div>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
+                  <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contentBreakdown.map((r) => (
+                  <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
+                    <td className="py-1.5 font-medium">{r.name}</td>
+                    <td className="py-1.5">{r.staticAssignedAll}</td>
+                    <td className="py-1.5">{r.staticCompletedAll}</td>
+                    <td className="py-1.5">{r.videoAssignedAll}</td>
+                    <td className="py-1.5">{r.videoCompletedAll}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
       </div>
 
-      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
-        <SectionTitle>Static vs Video — assigned &amp; completed, per member</SectionTitle>
-        <div className="text-[11px] mt-1 mb-3" style={{ color: "var(--muted)" }}>Transparency check — so workload skew toward one content type (all-video, all-static) is visible, not just felt.</div>
-
-        <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>This period — {periodLabelReadable}</div>
-        <table className="w-full text-sm mb-4">
-          <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {contentBreakdown.map((r) => (
-              <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
-                <td className="py-1.5 font-medium">{r.name}</td>
-                <td className="py-1.5">{r.staticAssignedPeriod}</td>
-                <td className="py-1.5">{r.staticCompletedPeriod}</td>
-                <td className="py-1.5">{r.videoAssignedPeriod}</td>
-                <td className="py-1.5">{r.videoCompletedPeriod}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <div className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>All-time</div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-              <th className="pb-2">Name</th><th className="pb-2">Static assigned</th><th className="pb-2">Static completed</th><th className="pb-2">Video assigned</th><th className="pb-2">Video completed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {contentBreakdown.map((r) => (
-              <tr key={r.id} className="border-t" style={{ borderColor: "var(--line)" }}>
-                <td className="py-1.5 font-medium">{r.name}</td>
-                <td className="py-1.5">{r.staticAssignedAll}</td>
-                <td className="py-1.5">{r.staticCompletedAll}</td>
-                <td className="py-1.5">{r.videoAssignedAll}</td>
-                <td className="py-1.5">{r.videoCompletedAll}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <div className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--muted)" }}>Trends</div>
 
       <div className="grid md:grid-cols-2 gap-4">
         <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
@@ -2788,7 +2915,7 @@ function ReportsView({ tickets, roster }) {
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={trend}>
                 <CartesianGrid stroke="var(--line)" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={periodType === "daily" ? 1 : 0} angle={periodType === "daily" ? -35 : 0} textAnchor={periodType === "daily" ? "end" : "middle"} height={periodType === "daily" ? 45 : 30} />
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={periodType === "monthly" ? 0 : 1} angle={periodType === "monthly" ? 0 : -35} textAnchor={periodType === "monthly" ? "middle" : "end"} height={periodType === "monthly" ? 30 : 45} />
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
