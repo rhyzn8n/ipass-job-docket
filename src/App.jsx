@@ -3,13 +3,13 @@ import {
   LayoutDashboard, FilePlus2, KanbanSquare, BarChart3, Users, Flag,
   Clock, CheckCircle2, AlertTriangle, X, Plus, Trash2, Pencil, Send,
   MessageSquarePlus, Star, ChevronRight, Download, Image as ImageIcon, Save,
-  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music, Play, Pause, Maximize2, Minimize2, SkipForward
+  FolderOpen, Heart, Bell, Megaphone, BellRing, Upload, Link as LinkIcon, Search, Trophy, Music, Play, Pause, Maximize2, Minimize2, SkipForward, Menu, LogOut
 } from "lucide-react";
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, PieChart, Pie, Cell
 } from "recharts";
-import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, endorsementsApi, subscribeMyEndorsements, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment } from "./firebase.js";
+import { storage, ticketsApi, chatApi, rosterApi, galleryApi, musicApi, endorsementsApi, subscribeMyEndorsements, auth, subscribeAuth, loginWithEmail, logout, uploadMusicTrack, deleteMusicTrackFile, uploadChatAttachment, deleteChatAttachment, getNextTicketNo } from "./firebase.js";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
@@ -148,6 +148,17 @@ function ensureYouTubeApi() {
       document.body.appendChild(tag);
     }
   });
+}
+
+// A simple, baseline-independent health read on "% of completed work that
+// needed a revision" — usable immediately, before any KPI baseline exists.
+// Thresholds are a reasonable starting default; adjust once you have a feel
+// for your own team's normal range.
+function revisionHealthBand(pct) {
+  if (pct <= 15) return { label: "Good", color: "var(--teal)" };
+  if (pct <= 30) return { label: "Normal", color: "var(--amber)" };
+  if (pct <= 50) return { label: "Watch", color: "#C9781F" };
+  return { label: "High", color: "var(--coral)" };
 }
 
 function mostLikedTrack(tracks) {
@@ -438,6 +449,7 @@ export default function CreativeOpsApp() {
   const [tickets, setTickets] = useState([]);
   const [ticketSeq, setTicketSeq] = useState(0);
   const [view, setView] = useState("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [ready, setReady] = useState(false);
   const [openTicketId, setOpenTicketId] = useState(null);
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
@@ -489,7 +501,10 @@ export default function CreativeOpsApp() {
       let seq = 0;
       try {
         const res = await storage.get("ticket_seq", true);
-        if (res && res.value) seq = JSON.parse(res.value);
+        if (res && res.value !== null && res.value !== undefined) {
+          const n = Number(res.value);
+          seq = Number.isFinite(n) ? n : (JSON.parse(res.value) || 0);
+        }
       } catch (e) {}
       setTicketSeq(seq);
 
@@ -593,7 +608,25 @@ export default function CreativeOpsApp() {
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
-    try { await storage.set("ticket_seq", JSON.stringify(next), true); } catch (e) {}
+    try { await storage.set("ticket_seq", next, true); } catch (e) {}
+  };
+  // Admin repair tool — the corruption already lives on existing ticket
+  // records (visible as JOB numbers in scientific notation), not just in
+  // the counter, so this renumbers every ticket sequentially by request
+  // date (oldest = 1) and resets the counter to continue after that.
+  // Doesn't touch any other field — titles, history, revisions, etc. are
+  // all untouched, only ticketNo changes.
+  const repairAllTicketNumbers = async () => {
+    const sorted = [...tickets].sort((a, b) => new Date(a.dateRequested) - new Date(b.dateRequested));
+    let n = 1;
+    for (const t of sorted) {
+      if (t.ticketNo !== n) {
+        await ticketsApi.upsert({ ...t, ticketNo: n });
+      }
+      n++;
+    }
+    await saveSeq(n - 1);
+    return n - 1;
   };
 
   // Identity is now the logged-in account, not a free-pick dropdown: your
@@ -804,7 +837,7 @@ export default function CreativeOpsApp() {
   };
 
   const createTicket = async (data) => {
-    const nextSeq = ticketSeq + 1;
+    const nextSeq = await getNextTicketNo();
     const newId = uid();
     const t = {
       id: newId,
@@ -837,7 +870,7 @@ export default function CreativeOpsApp() {
       history: [{ date: new Date().toISOString(), action: "Request logged", by: currentUser?.name || "Unknown" }],
     };
     await ticketsApi.upsert(t);
-    await saveSeq(nextSeq);
+    setTicketSeq(nextSeq);
     if (data.imageDataUrl) await saveInspoImage(newId, data.imageDataUrl);
     setView("board");
   };
@@ -888,22 +921,27 @@ export default function CreativeOpsApp() {
   };
 
   return (
-    <div style={outerStyle} className="min-h-[600px] w-full">
+    <div style={outerStyle} className="min-h-[600px] w-full flex">
       <FontStyles />
-      <Header
-        authUser={authUser}
-        isAdmin={isAdmin}
-        tickets={tickets}
-        announcements={announcements}
-        endorsements={endorsements}
-        currentUser={currentUser}
-        onOpen={setOpenTicketId}
+      <SideNav
+        view={view}
         setView={setView}
+        isLead={isLead}
+        isAdmin={isAdmin}
         logoUrl={logoUrl}
         appTagline={appTagline}
+        currentUser={currentUser}
+        authUser={authUser}
+        mobileOpen={mobileNavOpen}
+        setMobileOpen={setMobileNavOpen}
       />
-      <TabBar view={view} setView={setView} isLead={isLead} />
-      <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto" style={{ paddingBottom: nowPlaying ? 110 : undefined }}>
+      <div className="flex-1 min-w-0 flex flex-col">
+        <div className="flex items-center justify-between px-4 md:px-6 py-3 border-b" style={{ borderColor: "var(--line)", background: "white" }}>
+          <button onClick={() => setMobileNavOpen(true)} className="md:hidden" aria-label="Open menu"><Menu size={20} /></button>
+          <div className="hidden md:block" />
+          <NotificationBell tickets={tickets} announcements={announcements} endorsements={endorsements} currentUser={currentUser} onOpen={setOpenTicketId} setView={setView} />
+        </div>
+        <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto w-full" style={{ paddingBottom: nowPlaying ? 110 : undefined }}>
         {view === "dashboard" && (
           <DashboardView
             tickets={tickets}
@@ -962,10 +1000,12 @@ export default function CreativeOpsApp() {
             appTagline={appTagline}
             saveTagline={saveTagline}
             exportBackup={exportBackup}
+            repairAllTicketNumbers={repairAllTicketNumbers}
             restoreBackup={restoreBackup}
           />
         )}
-      </main>
+        </main>
+      </div>
       <NowPlayingBar track={nowPlaying} onClose={() => setNowPlaying(null)} onEnded={playNextTrack} onSkip={playNextTrack} />
       {openTicket && (
         <TicketModal
@@ -999,32 +1039,70 @@ function FontStyles() {
   );
 }
 
-function Header({ authUser, isAdmin, tickets, announcements, endorsements, currentUser, onOpen, setView, logoUrl, appTagline }) {
-  return (
-    <div className="border-b-2" style={{ borderColor: "var(--ink)" }}>
-      <div className="max-w-6xl mx-auto px-4 md:px-8 pt-6 pb-4 flex flex-wrap items-end justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {logoUrl && <img src={logoUrl} alt="logo" className="h-10 w-10 object-contain rounded" />}
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.3em]" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
-              {appTagline || "IPASS · Creative Production"}
-            </div>
-            <h1 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: "var(--font-display)" }}>Job Docket</h1>
-          </div>
+function SideNav({ view, setView, isLead, isAdmin, logoUrl, appTagline, currentUser, authUser, mobileOpen, setMobileOpen }) {
+  const tabs = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "new", label: "New Request", icon: FilePlus2 },
+    { id: "board", label: "Board", icon: KanbanSquare },
+    { id: "directory", label: "Directory", icon: FolderOpen },
+    ...(isLead ? [{ id: "reports", label: "Reports", icon: BarChart3, badge: "Lead" }] : []),
+    { id: "teamspace", label: "Team Space", icon: Heart },
+  ];
+
+  const navBody = (
+    <div className="h-full flex flex-col" style={{ background: "white" }}>
+      <div className="flex items-center gap-2 px-4 py-5 border-b" style={{ borderColor: "var(--line)" }}>
+        {logoUrl && <img src={logoUrl} alt="logo" className="h-8 w-8 object-contain rounded flex-shrink-0" />}
+        <div className="min-w-0">
+          <div className="text-[9px] uppercase tracking-[0.2em] truncate" style={{ color: "var(--muted)", fontFamily: "var(--font-mono)" }}>{appTagline || "IPASS · Creative Production"}</div>
+          <div className="text-lg font-black truncate" style={{ fontFamily: "var(--font-display)" }}>Job Docket</div>
         </div>
-        <div className="flex items-center gap-3">
-          <NotificationBell tickets={tickets} announcements={announcements} endorsements={endorsements} currentUser={currentUser} onOpen={onOpen} setView={setView} />
-          <div className="flex items-center gap-2 text-sm" style={{ color: "var(--muted)" }}>
-            <Avatar member={currentUser} size={26} />
-            <div>
-              <div className="font-semibold" style={{ color: "var(--ink)" }}>{currentUser?.name || authUser?.email}</div>
-              <div className="text-[11px]">{isAdmin ? "Admin" : currentUser?.role}</div>
-            </div>
-            <button onClick={logout} title="Sign out" className="ml-2 px-2 py-1 rounded border text-xs font-semibold" style={{ borderColor: "var(--line)" }}>Sign out</button>
+        <button onClick={() => setMobileOpen(false)} className="md:hidden ml-auto flex-shrink-0" aria-label="Close menu"><X size={18} /></button>
+      </div>
+      <div className="flex-1 overflow-y-auto px-2 py-3 space-y-0.5">
+        {tabs.map((t) => {
+          const Icon = t.icon;
+          const active = view === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => { setView(t.id); setMobileOpen(false); }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded text-sm font-semibold text-left"
+              style={{ background: active ? "var(--paper)" : "transparent", color: active ? "var(--ink)" : "var(--muted)", borderLeft: active ? "3px solid var(--amber)" : "3px solid transparent" }}
+            >
+              <Icon size={16} /> {t.label}
+              {t.badge && <span className="ml-auto text-[9px] px-1.5 py-0.5 rounded" style={{ background: "var(--paper)", color: "var(--muted)" }}>{t.badge}</span>}
+            </button>
+          );
+        })}
+      </div>
+      <div className="border-t px-3 py-3" style={{ borderColor: "var(--line)" }}>
+        <div className="flex items-center gap-2 text-sm">
+          <Avatar member={currentUser} size={26} />
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold truncate text-xs" style={{ color: "var(--ink)" }}>{currentUser?.name || authUser?.email}</div>
+            <div className="text-[10px]" style={{ color: "var(--muted)" }}>{isAdmin ? "Admin" : currentUser?.role}</div>
           </div>
+          <button onClick={logout} title="Sign out" aria-label="Sign out"><LogOut size={15} color="var(--muted)" /></button>
         </div>
       </div>
     </div>
+  );
+
+  return (
+    <>
+      <div className="hidden md:block flex-shrink-0" style={{ width: 220, borderRight: "1px solid var(--line)" }}>
+        {navBody}
+      </div>
+      {mobileOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
+          <div className="absolute left-0 top-0 bottom-0 w-64 shadow-lg">
+            {navBody}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1099,32 +1177,6 @@ function NotificationBell({ tickets, announcements, endorsements, currentUser, o
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function TabBar({ view, setView, isLead }) {
-  const tabs = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "new", label: "New Request", icon: FilePlus2 },
-    { id: "board", label: "Board", icon: KanbanSquare },
-    { id: "directory", label: "Directory", icon: FolderOpen },
-    ...(isLead ? [{ id: "reports", label: "Reports", icon: BarChart3 }] : []),
-    { id: "teamspace", label: "Team Space", icon: Heart },
-  ];
-  return (
-    <div className="border-b" style={{ borderColor: "var(--line)", background: "white" }}>
-      <div className="max-w-6xl mx-auto px-4 md:px-8 flex gap-1 overflow-x-auto">
-        {tabs.map((t) => {
-          const Icon = t.icon;
-          const active = view === t.id;
-          return (
-            <button key={t.id} onClick={() => setView(t.id)} className="flex items-center gap-1.5 px-3 py-3 text-sm font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors" style={{ borderColor: active ? "var(--amber)" : "transparent", color: active ? "var(--ink)" : "var(--muted)" }}>
-              <Icon size={15} /> {t.label}
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -1568,13 +1620,14 @@ function RequestsPanel({ tickets, roster, onOpen }) {
   const [tab, setTab] = useState("overdue");
   const today = todayISO();
 
+  const sortNewestFirst = (list, key) => [...list].sort((a, b) => new Date(b[key] || b.dateRequested) - new Date(a[key] || a.dateRequested));
   const groups = {
-    overdue: tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < today),
-    ongoing: tickets.filter((t) => !CLOSED_STATUSES.includes(t.status) && t.status !== "On Hold"),
-    onhold: tickets.filter((t) => t.status === "On Hold"),
-    completed: tickets.filter((t) => t.status === "Completed"),
-    cancelled: tickets.filter((t) => t.status === "Cancelled"),
-    all: tickets,
+    overdue: sortNewestFirst(tickets.filter((t) => t.dueDate && !PAUSED_STATUSES.includes(t.status) && t.dueDate < today), "dateRequested"),
+    ongoing: sortNewestFirst(tickets.filter((t) => !CLOSED_STATUSES.includes(t.status) && t.status !== "On Hold"), "dateRequested"),
+    onhold: sortNewestFirst(tickets.filter((t) => t.status === "On Hold"), "dateRequested"),
+    completed: sortNewestFirst(tickets.filter((t) => t.status === "Completed"), "dateCompleted"),
+    cancelled: sortNewestFirst(tickets.filter((t) => t.status === "Cancelled"), "dateRequested"),
+    all: sortNewestFirst(tickets, "dateRequested"),
   };
   const tabs = [
     { id: "overdue", label: "Overdue" },
@@ -1831,16 +1884,24 @@ function BoardView({ tickets, roster, onOpen }) {
         </div>
       </div>
       <div className="flex gap-3 overflow-x-auto pb-4">
-        {STATUSES.map((s) => (
-          <div key={s} className="min-w-[240px] w-[240px] flex-shrink-0">
-            <div className="text-xs font-bold uppercase tracking-wide mb-2 flex items-center justify-between" style={{ color: "var(--muted)" }}>
-              {s} <span>{filtered.filter((t) => t.status === s).length}</span>
+        {STATUSES.map((s) => {
+          const colTickets = filtered
+            .filter((t) => t.status === s)
+            .sort((a, b) => {
+              const key = s === "Completed" ? "dateCompleted" : "dateRequested";
+              return new Date(b[key] || b.dateRequested) - new Date(a[key] || a.dateRequested);
+            });
+          return (
+            <div key={s} className="min-w-[240px] w-[240px] flex-shrink-0">
+              <div className="text-xs font-bold uppercase tracking-wide mb-2 flex items-center justify-between" style={{ color: "var(--muted)" }}>
+                {s} <span>{colTickets.length}</span>
+              </div>
+              <div className="space-y-2">
+                {colTickets.map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
+              </div>
             </div>
-            <div className="space-y-2">
-              {filtered.filter((t) => t.status === s).map((t) => <TicketCard key={t.id} ticket={t} roster={roster} onOpen={onOpen} />)}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -2014,6 +2075,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
   const [revCategory, setRevCategory] = useState(REVISION_CATEGORIES[0]);
   const [internalCatchNote, setInternalCatchNote] = useState("");
   const [spotCheckNote, setSpotCheckNote] = useState("");
+  const [activityTab, setActivityTab] = useState("revisions");
   const [sat, setSat] = useState(ticket.satisfactionScore || 0);
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
   const [editing, setEditing] = useState(false);
@@ -2324,15 +2386,8 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
                 <button onClick={logInternalCatch} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--teal)" }}><CheckCircle2 size={13} /> Log catch</button>
               </div>
               <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-                Doesn't count against anyone's revision score — this tracks your own QC catches before the requester ever sees an issue.
+                Doesn't count against anyone's revision score — this tracks your own QC catches before the requester ever sees an issue. Visible to everyone under "Activity log" below.
               </div>
-              {(ticket.internalCatches || []).length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {ticket.internalCatches.map((c) => (
-                    <div key={c.id} className="text-xs">{c.note} <span style={{ color: "var(--muted)" }}>— {c.by}, {new Date(c.date).toLocaleDateString()}</span></div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 
@@ -2446,16 +2501,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
                     <button onClick={() => logSpotCheck(true)} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--teal)", color: "var(--teal)" }}>Confirmed OK</button>
                     <button onClick={() => logSpotCheck(false)} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Flag issue</button>
                   </div>
-                  {(ticket.spotChecks || []).length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {ticket.spotChecks.map((s) => (
-                        <div key={s.id} className="text-xs flex items-center gap-1.5">
-                          {s.ok ? <CheckCircle2 size={12} color="var(--teal)" /> : <AlertTriangle size={12} color="var(--coral)" />}
-                          {s.note || (s.ok ? "Confirmed against delivered file" : "")} <span style={{ color: "var(--muted)" }}>— {s.by}, {new Date(s.date).toLocaleDateString()}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Visible to everyone under "Activity log" above.</div>
                 </div>
               )}
             </div>
@@ -2469,16 +2515,46 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
             </div>
           )}
 
-          {ticket.revisions.length > 0 && (
+          {(ticket.revisions.length > 0 || (ticket.internalCatches || []).length > 0 || (ticket.spotChecks || []).length > 0) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
-              <SectionTitle>Revision history</SectionTitle>
-              <div className="mt-2 space-y-1.5 max-h-32 overflow-y-auto">
-                {ticket.revisions.map((r) => (
-                  <div key={r.id} className="text-xs">
-                    <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b>{r.category && <span style={{ color: "var(--muted)" }}> · {r.category}</span>} — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
-                  </div>
-                ))}
+              <SectionTitle>Activity log</SectionTitle>
+              <div className="flex gap-1 mt-2 mb-2">
+                <button onClick={() => setActivityTab("revisions")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "revisions" ? "var(--ink)" : "var(--paper)", color: activityTab === "revisions" ? "white" : "var(--muted)" }}>Revisions ({ticket.revisions.length})</button>
+                <button onClick={() => setActivityTab("catches")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "catches" ? "var(--ink)" : "var(--paper)", color: activityTab === "catches" ? "white" : "var(--muted)" }}>Internal catches ({(ticket.internalCatches || []).length})</button>
+                <button onClick={() => setActivityTab("spotchecks")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "spotchecks" ? "var(--ink)" : "var(--paper)", color: activityTab === "spotchecks" ? "white" : "var(--muted)" }}>Spot-checks ({(ticket.spotChecks || []).length})</button>
               </div>
+              {activityTab === "revisions" && (
+                ticket.revisions.length === 0 ? <EmptyState text="No revisions logged." /> : (
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {ticket.revisions.map((r) => (
+                      <div key={r.id} className="text-xs">
+                        <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b>{r.category && <span style={{ color: "var(--muted)" }}> · {r.category}</span>} — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+              {activityTab === "catches" && (
+                (ticket.internalCatches || []).length === 0 ? <EmptyState text="No internal catches logged." /> : (
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {ticket.internalCatches.map((c) => (
+                      <div key={c.id} className="text-xs">{c.note} <span style={{ color: "var(--muted)" }}>— {c.by}, {new Date(c.date).toLocaleDateString()}</span></div>
+                    ))}
+                  </div>
+                )
+              )}
+              {activityTab === "spotchecks" && (
+                (ticket.spotChecks || []).length === 0 ? <EmptyState text="No spot-checks logged yet." /> : (
+                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                    {ticket.spotChecks.map((s) => (
+                      <div key={s.id} className="text-xs flex items-center gap-1.5">
+                        {s.ok ? <CheckCircle2 size={12} color="var(--teal)" /> : <AlertTriangle size={12} color="var(--coral)" />}
+                        {s.note || (s.ok ? "Confirmed against delivered file" : "")} <span style={{ color: "var(--muted)" }}>— {s.by}, {new Date(s.date).toLocaleDateString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
             </div>
           )}
 
@@ -2971,11 +3047,24 @@ function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin })
             <div className="text-[11px] mb-3" style={{ color: "var(--muted)" }}>
               Assigned = estimated at assignment. Completed = confirmed actual once the work is done. Revisions never add points here — tracked separately as quality.
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-2">
               <StatCard label="Assigned workload (est.)" value={`${assignedPointsOrg} pts`} icon={Flag} />
               <StatCard label="Completed workload (actual)" value={`${completedPointsOrg} pts`} icon={CheckCircle2} />
               <StatCard label="Needed revision (quality)" value={`${completedNeedingRevision.length} of ${completedInPeriod.length} (${revisionRatePct}%)`} icon={Pencil} />
             </div>
+            {completedInPeriod.length > 0 && (() => {
+              const band = revisionHealthBand(revisionRatePct);
+              return (
+                <div className="flex items-center gap-3 flex-wrap mb-4 text-[11px]">
+                  <span className="flex items-center gap-1.5 font-semibold" style={{ color: band.color }}>
+                    <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: band.color }} /> {band.label} range
+                  </span>
+                  <span style={{ color: "var(--muted)" }}>
+                    Legend: <span style={{ color: "var(--teal)" }}>0–15% Good</span> · <span style={{ color: "var(--amber)" }}>15–30% Normal</span> · <span style={{ color: "#C9781F" }}>30–50% Watch</span> · <span style={{ color: "var(--coral)" }}>50%+ High</span>
+                  </span>
+                </div>
+              );
+            })()}
             {outlier && (
               <div className="rounded-md p-3 mb-3 flex items-center gap-2" style={{ background: outlier.deviationPct > 0 ? "rgba(198,84,61,0.12)" : "rgba(46,107,96,0.12)" }}>
                 <AlertTriangle size={16} color={outlier.deviationPct > 0 ? "var(--coral)" : "var(--teal)"} className="flex-shrink-0" />
@@ -3063,6 +3152,23 @@ function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin })
             <div className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>
               {kpiBaseline ? "Update baseline (Admin)" : "Set baseline (Admin) — required before ratings appear"}
             </div>
+            {!kpiBaseline && (
+              <button
+                onClick={() => {
+                  const trailing = [1, 2, 3].map((i) => shiftMonthKey(month, -i));
+                  const monthsWithData = trailing.filter((mk) => tickets.some((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk));
+                  const avg = monthsWithData.length
+                    ? monthsWithData.reduce((s, mk) => s + tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk).reduce((s2, t) => s2 + revisionEquivalent(t), 0), 0) / monthsWithData.length
+                    : teamRevEqPeriod;
+                  setBaselineValueInput(avg > 0 ? avg.toFixed(2) : "1");
+                  setBaselineReasonInput(monthsWithData.length ? `Auto-suggested from trailing ${monthsWithData.length}-month average` : "Provisional — no trailing history yet, based on the current period; replace once 3 months of real data exist");
+                }}
+                className="text-xs font-semibold mb-2 flex items-center gap-1"
+                style={{ color: "var(--teal)" }}
+              >
+                <CheckCircle2 size={13} /> No baseline yet? Suggest one from current data
+              </button>
+            )}
             <div className="flex flex-wrap gap-2 items-center">
               <input type="number" step="0.1" min="0" value={baselineValueInput} onChange={(e) => setBaselineValueInput(e.target.value)} placeholder="e.g. 15" className="w-24 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
               <input value={baselineReasonInput} onChange={(e) => setBaselineReasonInput(e.target.value)} placeholder="Reason (required — e.g. trailing 3-month average, Q3 reset)" className="flex-1 border rounded px-2 py-1 text-xs min-w-[200px]" style={{ borderColor: "var(--line)" }} />
@@ -3075,6 +3181,11 @@ function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin })
                 Save baseline
               </button>
             </div>
+            {!kpiBaseline && (
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                With little or no history yet, treat whatever you save as provisional — update it once you have 3 real months to average, since the whole rating depends on this number being meaningful.
+              </div>
+            )}
           </div>
         )}
 
@@ -3387,6 +3498,7 @@ function TeamHub(props) {
           appTagline={props.appTagline}
           saveTagline={props.saveTagline}
           exportBackup={props.exportBackup}
+          repairAllTicketNumbers={props.repairAllTicketNumbers}
           restoreBackup={props.restoreBackup}
           isLead={props.isLead}
           isAdmin={props.isAdmin}
@@ -3978,15 +4090,26 @@ function MusicCornerView({ tracks, roster, currentUser, isAdmin, addMusicTrack, 
   );
 }
 
-function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, logoUrl, saveLogo, clearLogo, appTagline, saveTagline, exportBackup, restoreBackup, isAdmin }) {
+function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpaper, logoUrl, saveLogo, clearLogo, appTagline, saveTagline, exportBackup, restoreBackup, repairAllTicketNumbers, isAdmin }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("Requester");
   const [dept, setDept] = useState("Other");
   const [uploadingId, setUploadingId] = useState(null);
   const [taglineInput, setTaglineInput] = useState(appTagline || "");
+  const [repairing, setRepairing] = useState(false);
+  const [repairResult, setRepairResult] = useState(null);
 
   useEffect(() => { setTaglineInput(appTagline || ""); }, [appTagline]);
+
+  const handleRepairNumbers = async () => {
+    if (!window.confirm("This renumbers every ticket sequentially by request date (oldest = JOB-0001). Titles, history, and all other data stay untouched — only the JOB number changes. Continue?")) return;
+    setRepairing(true);
+    setRepairResult(null);
+    const finalCount = await repairAllTicketNumbers();
+    setRepairing(false);
+    setRepairResult(`Done — tickets renumbered JOB-0001 through JOB-${String(finalCount).padStart(4, "0")}.`);
+  };
 
   const add = (e) => {
     e.preventDefault();
@@ -4081,6 +4204,19 @@ function TeamView({ roster, saveRoster, wallpaperUrl, saveWallpaper, clearWallpa
           Includes all requests, the roster, announcements, and reminders. Team photos and inspiration images are not included in the backup file — save those separately if needed. {isAdmin ? "" : "Only Admin can restore a backup."}
         </div>
       </div>
+
+      {isAdmin && (
+        <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--line)" }}>
+          <SectionTitle>Data integrity (Admin)</SectionTitle>
+          <div className="text-[11px] mt-1 mb-2" style={{ color: "var(--muted)" }}>
+            If JOB numbers ever look wrong or duplicated (a known issue from an old race-condition bug, now fixed going forward), this renumbers every existing ticket cleanly.
+          </div>
+          <button onClick={handleRepairNumbers} disabled={repairing} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-semibold border disabled:opacity-50" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>
+            <AlertTriangle size={13} /> {repairing ? "Renumbering…" : "Fix ticket numbering"}
+          </button>
+          {repairResult && <div className="text-[11px] mt-2" style={{ color: "var(--teal)" }}>{repairResult}</div>}
+        </div>
+      )}
 
       {isAdmin && (
         <form onSubmit={add} className="bg-white border rounded-md p-4 flex flex-wrap gap-2 items-end" style={{ borderColor: "var(--line)" }}>
