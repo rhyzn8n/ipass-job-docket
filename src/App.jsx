@@ -190,8 +190,9 @@ function workloadPoints(list, mode = "estimated") {
 }
 
 function revisionEquivalent(ticket) {
-  const minor = ticket.revisions.filter((r) => r.type === "minor").length;
-  const major = ticket.revisions.filter((r) => r.type === "major").length;
+  const active = ticket.revisions.filter((r) => !r.voided);
+  const minor = active.filter((r) => r.type === "minor").length;
+  const major = active.filter((r) => r.type === "major").length;
   return minor / 3 + major;
 }
 
@@ -2076,6 +2077,8 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
   const [internalCatchNote, setInternalCatchNote] = useState("");
   const [spotCheckNote, setSpotCheckNote] = useState("");
   const [activityTab, setActivityTab] = useState("revisions");
+  const [voidingId, setVoidingId] = useState(null);
+  const [voidReasonInput, setVoidReasonInput] = useState("");
   const [sat, setSat] = useState(ticket.satisfactionScore || 0);
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
   const [editing, setEditing] = useState(false);
@@ -2131,10 +2134,22 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
     if (!note.trim()) return;
     const revType = CATEGORY_TYPE_MAP[revCategory] || "minor";
     onUpdate(ticket.id, Object.assign(
-      (t) => ({ ...t, revisions: [...t.revisions, { id: uid(), type: revType, category: revCategory, note, taggedBy: currentUser?.name, date: new Date().toISOString() }] }),
+      (t) => ({ ...t, revisions: [...t.revisions, { id: uid(), type: revType, category: revCategory, note, taggedBy: currentUser?.name, taggedById: currentUser?.id || null, date: new Date().toISOString() }] }),
       { __label: `${revType === "minor" ? "Minor" : "Major"} revision logged (${revCategory})` }
     ));
     setNote("");
+  };
+  // Void, not delete — the entry stays visible with who/why, but stops
+  // counting toward Revision Equivalents and every stat derived from it.
+  // Admin can void anything; a Requester can only void their own entry —
+  // falls back to name-match for older entries logged before taggedById existed.
+  const canVoidRevision = (r) => isAdmin || (isRequester && (r.taggedById ? r.taggedById === currentUser?.id : r.taggedBy === currentUser?.name));
+  const voidRevision = (revisionId, reason) => {
+    if (!reason.trim()) return;
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, revisions: t.revisions.map((r) => r.id === revisionId ? { ...r, voided: true, voidedBy: currentUser?.name, voidedReason: reason.trim(), voidedDate: new Date().toISOString() } : r) }),
+      { __label: "Revision voided (mistaken entry — excluded from stats)" }
+    ));
   };
   const logInternalCatch = () => {
     if (!internalCatchNote.trim()) return;
@@ -2316,7 +2331,7 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
             <div>Requested by: <b style={{ color: "var(--ink)" }}>{nameOf(roster, ticket.requestedBy)}</b></div>
             <div>Assigned to: <b style={{ color: "var(--ink)" }}>{nameOf(roster, ticket.assignedTo)}</b></div>
             <div>Due: <b style={{ color: "var(--ink)" }}>{ticket.dueDate || "—"}</b></div>
-            <div>Revisions: <b style={{ color: "var(--ink)" }}>{ticket.revisions.length} ({revEq.toFixed(2)} major-eq.)</b></div>
+            <div>Revisions: <b style={{ color: "var(--ink)" }}>{ticket.revisions.filter((r) => !r.voided).length} ({revEq.toFixed(2)} major-eq.)</b></div>
           </div>
 
           {isLead && (
@@ -2365,15 +2380,23 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
           {isRequester && !CLOSED_STATUSES.includes(ticket.status) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Log a revision</SectionTitle>
-              <div className="flex flex-wrap gap-2 mt-2">
+              <div className="flex flex-wrap gap-2 mt-2 items-center">
                 <select value={revCategory} onChange={(e) => setRevCategory(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   {REVISION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
+                <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded" style={{ background: CATEGORY_TYPE_MAP[revCategory] === "major" ? "rgba(198,84,61,0.15)" : "rgba(217,154,43,0.15)", color: CATEGORY_TYPE_MAP[revCategory] === "major" ? "var(--coral)" : "var(--amber)" }}>
+                  → {CATEGORY_TYPE_MAP[revCategory] === "major" ? "Major" : "Minor"}
+                </span>
                 <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What needs to change?" className="flex-1 border rounded px-2 py-1 text-xs min-w-[120px]" style={{ borderColor: "var(--line)" }} />
                 <button onClick={addRevision} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><MessageSquarePlus size={13} /> Add</button>
               </div>
               <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
-                Minor/Major is set automatically by category (Wrong image/asset and Branding inconsistency are Major, everything else Minor) — this keeps the accuracy scoring consistent, so it's not a judgment call anyone can influence.
+                Minor/Major is set automatically by category — this keeps the accuracy scoring consistent, so it's not a judgment call anyone can influence.
+              </div>
+              <div className="text-[11px] mt-1 font-semibold" style={{ color: "var(--teal)" }}>
+                {ticket.revisions.filter((r) => !r.voided).length > 0
+                  ? `${ticket.revisions.filter((r) => !r.voided).length} logged on this ticket so far — found something else? Log it too, one at a time.`
+                  : "Found more than one issue? Log each one separately — there's no limit."}
               </div>
             </div>
           )}
@@ -2519,16 +2542,36 @@ function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, on
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Activity log</SectionTitle>
               <div className="flex gap-1 mt-2 mb-2">
-                <button onClick={() => setActivityTab("revisions")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "revisions" ? "var(--ink)" : "var(--paper)", color: activityTab === "revisions" ? "white" : "var(--muted)" }}>Revisions ({ticket.revisions.length})</button>
+                <button onClick={() => setActivityTab("revisions")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "revisions" ? "var(--ink)" : "var(--paper)", color: activityTab === "revisions" ? "white" : "var(--muted)" }}>Revisions ({ticket.revisions.filter((r) => !r.voided).length})</button>
                 <button onClick={() => setActivityTab("catches")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "catches" ? "var(--ink)" : "var(--paper)", color: activityTab === "catches" ? "white" : "var(--muted)" }}>Internal catches ({(ticket.internalCatches || []).length})</button>
                 <button onClick={() => setActivityTab("spotchecks")} className="px-2 py-1 text-xs font-semibold rounded" style={{ background: activityTab === "spotchecks" ? "var(--ink)" : "var(--paper)", color: activityTab === "spotchecks" ? "white" : "var(--muted)" }}>Spot-checks ({(ticket.spotChecks || []).length})</button>
               </div>
               {activityTab === "revisions" && (
                 ticket.revisions.length === 0 ? <EmptyState text="No revisions logged." /> : (
-                  <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
                     {ticket.revisions.map((r) => (
                       <div key={r.id} className="text-xs">
-                        <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b>{r.category && <span style={{ color: "var(--muted)" }}> · {r.category}</span>} — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
+                        <div style={r.voided ? { opacity: 0.55, textDecoration: "line-through" } : {}}>
+                          <b className="uppercase" style={{ color: r.type === "major" ? "var(--coral)" : "var(--amber)" }}>{r.type}</b>{r.category && <span style={{ color: "var(--muted)" }}> · {r.category}</span>} — {r.note} <span style={{ color: "var(--muted)" }}>({r.taggedBy})</span>
+                        </div>
+                        {r.voided ? (
+                          <div className="text-[10px] mt-0.5" style={{ color: "var(--coral)" }}>Voided by {r.voidedBy}, {new Date(r.voidedDate).toLocaleDateString()}: {r.voidedReason} — excluded from stats</div>
+                        ) : canVoidRevision(r) && (
+                          <button onClick={() => setVoidingId(voidingId === r.id ? null : r.id)} className="text-[10px] font-semibold" style={{ color: "var(--coral)" }}>Mistaken entry? Void it</button>
+                        )}
+                        {voidingId === r.id && (
+                          <div className="flex gap-1.5 mt-1">
+                            <input value={voidReasonInput} onChange={(e) => setVoidReasonInput(e.target.value)} placeholder="Why was this a mistake?" className="flex-1 border rounded px-1.5 py-0.5 text-[11px]" style={{ borderColor: "var(--line)" }} />
+                            <button
+                              onClick={() => { voidRevision(r.id, voidReasonInput); setVoidingId(null); setVoidReasonInput(""); }}
+                              disabled={!voidReasonInput.trim()}
+                              className="px-2 py-0.5 rounded text-white text-[10px] font-semibold disabled:opacity-40"
+                              style={{ background: "var(--coral)" }}
+                            >
+                              Confirm void
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2668,7 +2711,7 @@ function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin })
   const assignedInPeriod = requestedInPeriod.filter((t) => t.assignedTo);
   const assignedPointsOrg = workloadPoints(assignedInPeriod, "estimated");
   const completedPointsOrg = workloadPoints(completedInPeriod, "actual");
-  const completedNeedingRevision = completedInPeriod.filter((t) => (t.revisions || []).length > 0);
+  const completedNeedingRevision = completedInPeriod.filter((t) => (t.revisions || []).some((r) => !r.voided));
   const revisionRatePct = completedInPeriod.length ? Math.round((completedNeedingRevision.length / completedInPeriod.length) * 100) : 0;
   const workloadByMember = roster
     .filter((m) => m.role === "Artist" || m.role === "Team Lead")
@@ -2679,7 +2722,7 @@ function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin })
         name: m.name, id: m.id,
         assignedPts: workloadPoints(assignedPeriod, "estimated"),
         completedPts: workloadPoints(completedPeriod, "actual"),
-        needingRevision: completedPeriod.filter((t) => (t.revisions || []).length > 0).length,
+        needingRevision: completedPeriod.filter((t) => (t.revisions || []).some((r) => !r.voided)).length,
         completedCount: completedPeriod.length,
         revisionPoints: completedPeriod.reduce((s, t) => s + revisionEquivalent(t), 0),
       };
