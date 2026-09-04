@@ -43,6 +43,20 @@ function contentSuperType(ct) {
 }
 const PURPOSES = ["Ads", "YouTube", "TikTok", "Facebook/IG", "Website", "Other"];
 const REVISION_CATEGORIES = ["Typo/Text error", "Wrong color", "Wrong size/dimension", "Layout/alignment", "Wrong image/asset", "Branding inconsistency", "Content/copy change", "Other"];
+// Fixed rubric — removes the "judgment call" the KPI safeguards explicitly
+// flag as a data-integrity risk. Category alone determines type; nobody
+// picks Minor/Major by hand anymore. "Other" always classifies Minor (a
+// required note explains what it was) rather than becoming a loophole.
+const CATEGORY_TYPE_MAP = {
+  "Typo/Text error": "minor",
+  "Wrong color": "minor",
+  "Wrong size/dimension": "minor",
+  "Layout/alignment": "minor",
+  "Content/copy change": "minor",
+  "Wrong image/asset": "major",
+  "Branding inconsistency": "major",
+  "Other": "minor",
+};
 // Fixed 0–5 workload-point scale, agreed once and applied consistently —
 // NOT tied to Static/Video (a static piece can be a 4, a simple video a 2).
 // Set by Team Lead at assignment time, for balancing decisions — separate
@@ -429,6 +443,7 @@ export default function CreativeOpsApp() {
   const [wallpaperUrl, setWallpaperUrl] = useState(null);
   const [logoUrl, setLogoUrl] = useState(null);
   const [appTagline, setAppTagline] = useState("");
+  const [kpiBaseline, setKpiBaseline] = useState(null); // {value, reason, setByName, date} | null
 
   useEffect(() => {
     const link = document.getElementById("app-favicon");
@@ -461,6 +476,7 @@ export default function CreativeOpsApp() {
     let unsubWallpaper = null;
     let unsubLogo = null;
     let unsubTagline = null;
+    let unsubKpiBaseline = null;
     let unsubAnnouncements = null;
     let unsubReminders = null;
     let unsubEndorsements = null;
@@ -501,6 +517,7 @@ export default function CreativeOpsApp() {
       unsubWallpaper = storage.subscribe("wallpaper_image", true, (val) => setWallpaperUrl(val || null));
       unsubLogo = storage.subscribe("app_logo", true, (val) => setLogoUrl(val || null));
       unsubTagline = storage.subscribe("app_tagline", true, (val) => setAppTagline(val || ""));
+      unsubKpiBaseline = storage.subscribe("kpi_baseline", true, (val) => setKpiBaseline(val || null));
       unsubAnnouncements = storage.subscribe("announcements", true, (val) => setAnnouncements(val ? JSON.parse(val) : []));
       unsubReminders = storage.subscribe("reminders", true, (val) => setReminders(val ? JSON.parse(val) : []));
       {
@@ -518,6 +535,7 @@ export default function CreativeOpsApp() {
       if (unsubWallpaper) unsubWallpaper();
       if (unsubLogo) unsubLogo();
       if (unsubTagline) unsubTagline();
+      if (unsubKpiBaseline) unsubKpiBaseline();
       if (unsubAnnouncements) unsubAnnouncements();
       if (unsubReminders) unsubReminders();
       if (unsubEndorsements) unsubEndorsements();
@@ -562,6 +580,16 @@ export default function CreativeOpsApp() {
   const saveTagline = async (text) => {
     setAppTagline(text);
     try { await storage.set("app_tagline", text, true); } catch (e) {}
+  };
+  // Admin-gated by app logic AND by a dedicated Firestore rule (baseline
+  // integrity matters more than most shared docs, since the Team Lead's
+  // KPI rating depends on it) — see the updated firestore.rules for
+  // shared/kpi_baseline specifically.
+  const saveKpiBaseline = async (value, reason) => {
+    if (!isAdmin || !reason.trim()) return;
+    const next = { value, reason: reason.trim(), setByName: currentUser?.name || authUser?.email || "Admin", date: new Date().toISOString() };
+    setKpiBaseline(next);
+    try { await storage.set("kpi_baseline", next, true); } catch (e) {}
   };
   const saveSeq = async (next) => {
     setTicketSeq(next);
@@ -796,6 +824,8 @@ export default function CreativeOpsApp() {
       dateCompleted: null,
       revisions: [],
       revisionRequests: [],
+      internalCatches: [],
+      spotChecks: [],
       units: null,
       complexity: null,
       estimatedComplexity: null,
@@ -872,7 +902,7 @@ export default function CreativeOpsApp() {
         logoUrl={logoUrl}
         appTagline={appTagline}
       />
-      <TabBar view={view} setView={setView} />
+      <TabBar view={view} setView={setView} isLead={isLead} />
       <main className="px-4 md:px-8 py-6 max-w-6xl mx-auto" style={{ paddingBottom: nowPlaying ? 110 : undefined }}>
         {view === "dashboard" && (
           <DashboardView
@@ -892,7 +922,13 @@ export default function CreativeOpsApp() {
         {view === "new" && <NewRequestForm roster={roster} currentUser={currentUser} onCreate={createTicket} tickets={tickets} />}
         {view === "board" && <BoardView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
         {view === "directory" && <DirectoryView tickets={tickets} roster={roster} onOpen={setOpenTicketId} />}
-        {view === "reports" && <ReportsView tickets={tickets} roster={roster} />}
+        {view === "reports" && (isLead ? <ReportsView tickets={tickets} roster={roster} kpiBaseline={kpiBaseline} saveKpiBaseline={saveKpiBaseline} isAdmin={isAdmin} /> : (
+          <div className="bg-white border rounded-md p-6 text-center" style={{ borderColor: "var(--line)" }}>
+            <AlertTriangle size={20} color="var(--coral)" className="mx-auto mb-2" />
+            <div className="text-sm font-semibold">Reports is limited to Admin and Team Lead</div>
+            <div className="text-xs mt-1" style={{ color: "var(--muted)" }}>Ask your Team Lead if you need something from here.</div>
+          </div>
+        ))}
         {view === "teamspace" && (
           <TeamHub
             roster={roster}
@@ -937,6 +973,7 @@ export default function CreativeOpsApp() {
           roster={roster}
           currentUser={currentUser}
           isLead={isLead}
+          isAdmin={isAdmin}
           onClose={() => setOpenTicketId(null)}
           onUpdate={updateTicket}
           onDelete={deleteTicket}
@@ -1066,13 +1103,13 @@ function NotificationBell({ tickets, announcements, endorsements, currentUser, o
   );
 }
 
-function TabBar({ view, setView }) {
+function TabBar({ view, setView, isLead }) {
   const tabs = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "new", label: "New Request", icon: FilePlus2 },
     { id: "board", label: "Board", icon: KanbanSquare },
     { id: "directory", label: "Directory", icon: FolderOpen },
-    { id: "reports", label: "Reports", icon: BarChart3 },
+    ...(isLead ? [{ id: "reports", label: "Reports", icon: BarChart3 }] : []),
     { id: "teamspace", label: "Team Space", icon: Heart },
   ];
   return (
@@ -1972,10 +2009,11 @@ function ChatView({ messages, roster, currentUser, isLead, sendMessage, deleteMe
   );
 }
 
-function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, onDelete, setActiveTicket, tickets }) {
+function TicketModal({ ticket, roster, currentUser, isLead, isAdmin, onClose, onUpdate, onDelete, setActiveTicket, tickets }) {
   const [note, setNote] = useState("");
-  const [revType, setRevType] = useState("minor");
   const [revCategory, setRevCategory] = useState(REVISION_CATEGORIES[0]);
+  const [internalCatchNote, setInternalCatchNote] = useState("");
+  const [spotCheckNote, setSpotCheckNote] = useState("");
   const [sat, setSat] = useState(ticket.satisfactionScore || 0);
   const [comp, setComp] = useState(ticket.briefCompliance || 0);
   const [editing, setEditing] = useState(false);
@@ -2029,11 +2067,28 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
   };
   const addRevision = () => {
     if (!note.trim()) return;
+    const revType = CATEGORY_TYPE_MAP[revCategory] || "minor";
     onUpdate(ticket.id, Object.assign(
       (t) => ({ ...t, revisions: [...t.revisions, { id: uid(), type: revType, category: revCategory, note, taggedBy: currentUser?.name, date: new Date().toISOString() }] }),
       { __label: `${revType === "minor" ? "Minor" : "Major"} revision logged (${revCategory})` }
     ));
     setNote("");
+  };
+  const logInternalCatch = () => {
+    if (!internalCatchNote.trim()) return;
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, internalCatches: [...(t.internalCatches || []), { id: uid(), note: internalCatchNote, by: currentUser?.name, date: new Date().toISOString() }] }),
+      { __label: "Internal catch logged (caught before requester review)" }
+    ));
+    setInternalCatchNote("");
+  };
+  const logSpotCheck = (ok) => {
+    if (!spotCheckNote.trim() && !ok) return; // require a note when flagging a problem; optional when confirming OK
+    onUpdate(ticket.id, Object.assign(
+      (t) => ({ ...t, spotChecks: [...(t.spotChecks || []), { id: uid(), ok, note: spotCheckNote, by: currentUser?.name, date: new Date().toISOString() }] }),
+      { __label: `Spot-check logged (${ok ? "OK" : "issue found"})` }
+    ));
+    setSpotCheckNote("");
   };
   const addRevisionPoint = () => {
     if (!revisionPoint.trim()) return;
@@ -2245,21 +2300,39 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
             </div>
           )}
 
-          {(isAssignee || isLead) && !CLOSED_STATUSES.includes(ticket.status) && (
+          {isRequester && !CLOSED_STATUSES.includes(ticket.status) && (
             <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
               <SectionTitle>Log a revision</SectionTitle>
               <div className="flex flex-wrap gap-2 mt-2">
-                <select value={revType} onChange={(e) => setRevType(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
-                  <option value="minor">Minor</option>
-                  <option value="major">Major</option>
-                </select>
                 <select value={revCategory} onChange={(e) => setRevCategory(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }}>
                   {REVISION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
-                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed?" className="flex-1 border rounded px-2 py-1 text-xs min-w-[120px]" style={{ borderColor: "var(--line)" }} />
+                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="What needs to change?" className="flex-1 border rounded px-2 py-1 text-xs min-w-[120px]" style={{ borderColor: "var(--line)" }} />
                 <button onClick={addRevision} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--ink)" }}><MessageSquarePlus size={13} /> Add</button>
               </div>
-              {!isLead && <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>Note: only the Team Lead's tagging counts toward official minor/major stats.</div>}
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                Minor/Major is set automatically by category (Wrong image/asset and Branding inconsistency are Major, everything else Minor) — this keeps the accuracy scoring consistent, so it's not a judgment call anyone can influence.
+              </div>
+            </div>
+          )}
+
+          {isLead && !CLOSED_STATUSES.includes(ticket.status) && (
+            <div className="border-t pt-3 mb-3" style={{ borderColor: "var(--line)" }}>
+              <SectionTitle>Log an internal catch (before requester review)</SectionTitle>
+              <div className="flex flex-wrap gap-2 mt-2">
+                <input value={internalCatchNote} onChange={(e) => setInternalCatchNote(e.target.value)} placeholder="What did you catch?" className="flex-1 border rounded px-2 py-1 text-xs min-w-[140px]" style={{ borderColor: "var(--line)" }} />
+                <button onClick={logInternalCatch} className="px-2 py-1 rounded text-white text-xs font-semibold flex items-center gap-1" style={{ background: "var(--teal)" }}><CheckCircle2 size={13} /> Log catch</button>
+              </div>
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                Doesn't count against anyone's revision score — this tracks your own QC catches before the requester ever sees an issue.
+              </div>
+              {(ticket.internalCatches || []).length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {ticket.internalCatches.map((c) => (
+                    <div key={c.id} className="text-xs">{c.note} <span style={{ color: "var(--muted)" }}>— {c.by}, {new Date(c.date).toLocaleDateString()}</span></div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -2365,6 +2438,26 @@ function TicketModal({ ticket, roster, currentUser, isLead, onClose, onUpdate, o
                   <AlertTriangle size={13} /> Reopen (mark as mistake)
                 </button>
               )}
+              {isAdmin && (
+                <div className="mt-3 pt-3 border-t" style={{ borderColor: "var(--line)" }}>
+                  <div className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>Spot-check (Admin) — confirm against the delivered file</div>
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <input value={spotCheckNote} onChange={(e) => setSpotCheckNote(e.target.value)} placeholder="Note (required if flagging an issue)" className="flex-1 border rounded px-2 py-1 text-xs min-w-[140px]" style={{ borderColor: "var(--line)" }} />
+                    <button onClick={() => logSpotCheck(true)} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--teal)", color: "var(--teal)" }}>Confirmed OK</button>
+                    <button onClick={() => logSpotCheck(false)} className="px-2 py-1 rounded text-xs font-semibold border" style={{ borderColor: "var(--coral)", color: "var(--coral)" }}>Flag issue</button>
+                  </div>
+                  {(ticket.spotChecks || []).length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {ticket.spotChecks.map((s) => (
+                        <div key={s.id} className="text-xs flex items-center gap-1.5">
+                          {s.ok ? <CheckCircle2 size={12} color="var(--teal)" /> : <AlertTriangle size={12} color="var(--coral)" />}
+                          {s.note || (s.ok ? "Confirmed against delivered file" : "")} <span style={{ color: "var(--muted)" }}>— {s.by}, {new Date(s.date).toLocaleDateString()}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -2415,7 +2508,7 @@ function StarRow({ value, onChange }) {
   );
 }
 
-function ReportsView({ tickets, roster }) {
+function ReportsView({ tickets, roster, kpiBaseline, saveKpiBaseline, isAdmin }) {
   const reportRef = useRef(null);
   const [reportTab, setReportTab] = useState("completed"); // "completed" | "ongoing"
   const [periodType, setPeriodType] = useState("monthly"); // "monthly" | "weekly" | "daily" | "range"
@@ -2433,6 +2526,8 @@ function ReportsView({ tickets, roster }) {
   const [purposeChartType, setPurposeChartType] = useState("pie"); // "pie" | "bar"
   const [categoryChartType, setCategoryChartType] = useState("bar"); // "bar" | "pie"
   const [metricTab, setMetricTab] = useState("overview"); // "overview" | "workload" | "content"
+  const [baselineValueInput, setBaselineValueInput] = useState("");
+  const [baselineReasonInput, setBaselineReasonInput] = useState("");
 
   const weekEnd = shiftDayKey(weekStart, 6);
   const pickWeekFor = (dateStr) => {
@@ -2510,8 +2605,61 @@ function ReportsView({ tickets, roster }) {
         completedPts: workloadPoints(completedPeriod, "actual"),
         needingRevision: completedPeriod.filter((t) => (t.revisions || []).length > 0).length,
         completedCount: completedPeriod.length,
+        revisionPoints: completedPeriod.reduce((s, t) => s + revisionEquivalent(t), 0),
       };
     });
+
+  // Outlier — whoever's assigned workload for this period sits meaningfully
+  // off the team average, in either direction, with the actual number
+  // stated (not just a flag) so it's clear WHY they're called out.
+  const avgAssignedPts = workloadByMember.length ? workloadByMember.reduce((s, r) => s + r.assignedPts, 0) / workloadByMember.length : 0;
+  const outlier = (() => {
+    if (avgAssignedPts <= 0 || workloadByMember.length < 2) return null;
+    let best = null;
+    for (const r of workloadByMember) {
+      const deviationPct = ((r.assignedPts - avgAssignedPts) / avgAssignedPts) * 100;
+      if (Math.abs(deviationPct) >= 35 && (!best || Math.abs(deviationPct) > Math.abs(best.deviationPct))) {
+        best = { ...r, deviationPct: Math.round(deviationPct) };
+      }
+    }
+    return best;
+  })();
+
+  // Team Leader KPI — Revision Equivalent vs. admin-set baseline. Most
+  // meaningful in Monthly view, since the baseline itself is a monthly
+  // figure; shown as informational (no rating tier) for other periods.
+  const teamRevEqPeriod = completedInPeriod.reduce((s, t) => s + revisionEquivalent(t), 0);
+  const kpiRating = (() => {
+    if (periodType !== "monthly" || !kpiBaseline || !kpiBaseline.value) return null;
+    const reductionPct = ((kpiBaseline.value - teamRevEqPeriod) / kpiBaseline.value) * 100;
+    let rating = "Meets Minimum";
+    if (reductionPct >= 20) rating = "Outstanding Performance";
+    else if (reductionPct >= 10) rating = "Expected Performance";
+    return { reductionPct: Math.round(reductionPct), rating };
+  })();
+  // Volume-normalized check — a drop in revisions alongside a drop in
+  // output is a flag, not a win, per the KPI's own safeguard. Trailing
+  // volume is computed live (not admin-set) purely for this comparison.
+  const volumeFlag = (() => {
+    if (periodType !== "monthly") return null;
+    const trailing = [1, 2, 3].map((i) => shiftMonthKey(month, -i));
+    const volumes = trailing.map((mk) => tickets.filter((t) => t.status === "Completed" && monthKey(t.dateCompleted) === mk).length);
+    const avgTrailingVolume = volumes.length ? volumes.reduce((a, b) => a + b, 0) / volumes.length : 0;
+    if (avgTrailingVolume <= 0) return null;
+    const volumeDropPct = Math.round(((avgTrailingVolume - completedInPeriod.length) / avgTrailingVolume) * 100);
+    return volumeDropPct >= 15 ? volumeDropPct : null;
+  })();
+
+  // Team Lead tagboard — two metrics, kept separate on purpose. "Checked"
+  // reuses completedInPeriod/revisionRatePct (he approves every completion,
+  // being the sole Team Lead). "Internal catches" is a distinct, unscored
+  // activity signal — issues he caught himself before the requester ever saw them.
+  const internalCatchesInPeriod = tickets
+    .flatMap((t) => (t.internalCatches || []).map((c) => ({ ...c, ticketNo: t.ticketNo })))
+    .filter((c) => inPeriod((c.date || "").slice(0, 10)));
+  const spotChecksInPeriod = tickets
+    .flatMap((t) => (t.spotChecks || []).map((s) => ({ ...s, ticketNo: t.ticketNo })))
+    .filter((s) => inPeriod((s.date || "").slice(0, 10)));
 
   // Previous-period comparison ("vs last month" / "vs yesterday") — only
   // meaningful for monthly/daily modes, since a custom range has no fixed
@@ -2828,10 +2976,19 @@ function ReportsView({ tickets, roster }) {
               <StatCard label="Completed workload (actual)" value={`${completedPointsOrg} pts`} icon={CheckCircle2} />
               <StatCard label="Needed revision (quality)" value={`${completedNeedingRevision.length} of ${completedInPeriod.length} (${revisionRatePct}%)`} icon={Pencil} />
             </div>
+            {outlier && (
+              <div className="rounded-md p-3 mb-3 flex items-center gap-2" style={{ background: outlier.deviationPct > 0 ? "rgba(198,84,61,0.12)" : "rgba(46,107,96,0.12)" }}>
+                <AlertTriangle size={16} color={outlier.deviationPct > 0 ? "var(--coral)" : "var(--teal)"} className="flex-shrink-0" />
+                <div className="text-xs">
+                  <span className="font-bold">Outlier this period — {outlier.name}</span>
+                  <span style={{ color: "var(--muted)" }}> — {outlier.assignedPts} pts assigned, {Math.abs(outlier.deviationPct)}% {outlier.deviationPct > 0 ? "above" : "below"} the team average ({Math.round(avgAssignedPts)} pts)</span>
+                </div>
+              </div>
+            )}
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs uppercase" style={{ color: "var(--muted)" }}>
-                  <th className="pb-2">Name</th><th className="pb-2">Assigned pts (est.)</th><th className="pb-2">Completed pts (actual)</th><th className="pb-2">Completed</th><th className="pb-2">Needed revision</th>
+                  <th className="pb-2">Name</th><th className="pb-2">Assigned pts (est.)</th><th className="pb-2">Completed pts (actual)</th><th className="pb-2">Completed</th><th className="pb-2">Needed revision</th><th className="pb-2">Revision points</th>
                 </tr>
               </thead>
               <tbody>
@@ -2842,6 +2999,7 @@ function ReportsView({ tickets, roster }) {
                     <td className="py-1.5">{r.completedPts}</td>
                     <td className="py-1.5">{r.completedCount}</td>
                     <td className="py-1.5">{r.needingRevision}</td>
+                    <td className="py-1.5">{r.revisionPoints.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2891,6 +3049,76 @@ function ReportsView({ tickets, roster }) {
               </tbody>
             </table>
           </>
+        )}
+      </div>
+
+      <div className="bg-white border rounded-md p-4" style={{ borderColor: "var(--amber)" }}>
+        <SectionTitle>Team Leader KPI — Team Accuracy &amp; Revision Control</SectionTitle>
+        <div className="text-[11px] mt-1 mb-3" style={{ color: "var(--muted)" }}>
+          Revision Equivalent = Major + (Minor ÷ 3). Rated only in Monthly view, since the baseline is a monthly figure.
+        </div>
+
+        {isAdmin && (
+          <div className="mb-4 p-3 rounded-md" style={{ background: "var(--paper)" }}>
+            <div className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--muted)" }}>
+              {kpiBaseline ? "Update baseline (Admin)" : "Set baseline (Admin) — required before ratings appear"}
+            </div>
+            <div className="flex flex-wrap gap-2 items-center">
+              <input type="number" step="0.1" min="0" value={baselineValueInput} onChange={(e) => setBaselineValueInput(e.target.value)} placeholder="e.g. 15" className="w-24 border rounded px-2 py-1 text-xs" style={{ borderColor: "var(--line)" }} />
+              <input value={baselineReasonInput} onChange={(e) => setBaselineReasonInput(e.target.value)} placeholder="Reason (required — e.g. trailing 3-month average, Q3 reset)" className="flex-1 border rounded px-2 py-1 text-xs min-w-[200px]" style={{ borderColor: "var(--line)" }} />
+              <button
+                onClick={() => { if (baselineValueInput !== "" && baselineReasonInput.trim()) { saveKpiBaseline(Number(baselineValueInput), baselineReasonInput); setBaselineValueInput(""); setBaselineReasonInput(""); } }}
+                disabled={baselineValueInput === "" || !baselineReasonInput.trim()}
+                className="px-2 py-1 rounded text-white text-xs font-semibold disabled:opacity-40"
+                style={{ background: "var(--ink)" }}
+              >
+                Save baseline
+              </button>
+            </div>
+          </div>
+        )}
+
+        {kpiBaseline ? (
+          <div className="text-xs mb-3" style={{ color: "var(--muted)" }}>
+            Current baseline: <span className="font-semibold" style={{ color: "var(--ink)" }}>{kpiBaseline.value} Revision Equivalents/month</span> — set by {kpiBaseline.setByName} on {new Date(kpiBaseline.date).toLocaleDateString()}. Reason: {kpiBaseline.reason}
+          </div>
+        ) : (
+          <div className="text-xs mb-3" style={{ color: "var(--coral)" }}>No baseline set yet — Admin needs to set one before this KPI can be rated.</div>
+        )}
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <StatCard label={`Revision Equivalents — ${periodLabelReadable}`} value={teamRevEqPeriod.toFixed(2)} icon={Pencil} />
+          {kpiRating ? (
+            <div className="bg-white border rounded-md p-3" style={{ borderColor: kpiRating.rating === "Outstanding Performance" ? "var(--teal)" : kpiRating.rating === "Expected Performance" ? "var(--amber)" : "var(--coral)" }}>
+              <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider" style={{ color: "var(--muted)" }}><Trophy size={13} /> Rating</div>
+              <div className="text-lg font-black mt-1" style={{ fontFamily: "var(--font-display)", color: kpiRating.rating === "Outstanding Performance" ? "var(--teal)" : kpiRating.rating === "Expected Performance" ? "var(--amber)" : "var(--coral)" }}>{kpiRating.rating}</div>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{kpiRating.reductionPct >= 0 ? `${kpiRating.reductionPct}% reduction` : `${Math.abs(kpiRating.reductionPct)}% increase`} vs. baseline</div>
+            </div>
+          ) : (
+            <div className="bg-white border rounded-md p-3 flex items-center" style={{ borderColor: "var(--line)" }}>
+              <div className="text-[11px]" style={{ color: "var(--muted)" }}>{periodType !== "monthly" ? "Switch to Monthly view to see the rating." : "Set a baseline above to see the rating."}</div>
+            </div>
+          )}
+        </div>
+
+        {volumeFlag !== null && (
+          <div className="rounded-md p-3 mb-3 flex items-center gap-2" style={{ background: "rgba(198,84,61,0.12)" }}>
+            <AlertTriangle size={16} color="var(--coral)" className="flex-shrink-0" />
+            <div className="text-xs">
+              <span className="font-bold">Volume check</span>
+              <span style={{ color: "var(--muted)" }}> — output is down {volumeFlag}% vs. the trailing 3-month average. A revision drop alongside a volume drop is a flag, not a win — worth a look before crediting this as improvement.</span>
+            </div>
+          </div>
+        )}
+
+        <div className="text-xs font-bold uppercase tracking-wide mb-2 mt-4" style={{ color: "var(--muted)" }}>Team Lead tagboard — {periodLabelReadable}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <StatCard label="Projects checked" value={completedInPeriod.length} icon={CheckCircle2} />
+          <StatCard label="Revision-flag rate" value={`${revisionRatePct}%`} icon={Flag} />
+          <StatCard label="Internal catches (unscored)" value={internalCatchesInPeriod.length} icon={AlertTriangle} />
+        </div>
+        {spotChecksInPeriod.length > 0 && (
+          <div className="text-[11px] mt-2" style={{ color: "var(--muted)" }}>{spotChecksInPeriod.length} spot-check{spotChecksInPeriod.length === 1 ? "" : "s"} logged by Admin this period.</div>
         )}
       </div>
 
