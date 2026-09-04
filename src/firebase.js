@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot, query, where } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, onSnapshot, query, where, runTransaction } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
@@ -19,6 +19,25 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 export const auth = getAuth(app);
 const fbStorage = getStorage(app);
+
+// Ticket numbers used to be assigned by reading a shared counter, adding 1,
+// and saving it back client-side — with nothing keeping that counter live
+// across open sessions. Two people creating requests around the same time
+// would both work from a stale copy and race each other, producing
+// duplicate/corrupted numbers. A Firestore transaction is the real fix:
+// the read-and-write happens as one atomic unit, so Firestore itself
+// serializes any concurrent attempts — no two calls can ever get the same
+// number, even from two people clicking "Create" at the exact same moment.
+export async function getNextTicketNo() {
+  const ref = doc(db, "shared", "ticket_seq");
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const current = snap.exists() && typeof snap.data().value === "number" ? snap.data().value : 0;
+    const next = current + 1;
+    transaction.set(ref, { value: next });
+    return next;
+  });
+}
 
 // Real file hosting — for anything too large to live inside a Firestore
 // document (like a full-length song). Files are streamed, not text-encoded,
